@@ -1,0 +1,7 @@
+{
+  "name": "CoreIQ CRM",
+  "description": "Private operator CRM and AI agent hub for CoreIQ Create with pipeline, client card, price book, quotes, and MCP/REST API.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+

@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <rect width="512" height="512" rx="96" fill="#04091A"/>
+  <rect x="24" y="24" width="464" height="464" rx="72" fill="none" stroke="#00f2fe" stroke-width="4" stroke-opacity="0.3"/>
+  <!-- Central CoreIQ Logo Mark -->
+  <g transform="translate(106, 106)">
+    <!-- Circuit grid paths -->
+    <path d="M 50 150 L 150 50 L 250 150 L 150 250 Z" fill="none" stroke="#00e5ff" stroke-width="12" stroke-linejoin="round"/>
+    <circle cx="150" cy="50" r="14" fill="#00e5ff"/>
+    <circle cx="250" cy="150" r="14" fill="#3b82f6"/>
+    <circle cx="150" cy="250" r="14" fill="#06b6d4"/>
+    <circle cx="50" cy="150" r="14" fill="#6366f1"/>
+    <!-- Core diamond -->
+    <rect x="110" y="110" width="80" height="80" rx="16" transform="rotate(45 150 150)" fill="#00e5ff" fill-opacity="0.2" stroke="#00f2fe" stroke-width="8"/>
+    <circle cx="150" cy="150" r="22" fill="#00f2fe"/>
+  </g>
+  <text x="256" y="440" font-family="system-ui, -apple-system, sans-serif" font-size="44" font-weight="800" fill="#f8fafc" letter-spacing="4" text-anchor="middle">COREIQ</text>
+</svg>

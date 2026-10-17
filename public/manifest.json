@@ -1,0 +1,19 @@
+{
+  "id": "/",
+  "name": "CoreIQ CRM",
+  "short_name": "CoreIQ",
+  "description": "Private operator CRM and AI agent hub for CoreIQ Create.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#04091A",
+  "theme_color": "#04091A",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "192x192 512x512",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}
