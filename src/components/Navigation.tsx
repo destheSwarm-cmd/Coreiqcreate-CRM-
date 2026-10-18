@@ -16,6 +16,7 @@ import {
   Calendar,
   Layers,
   LayoutDashboard,
+  LogOut,
 } from 'lucide-react';
 import { PWAInstallButton } from './PWAInstallButton';
 import { AppRole } from '../types/crm';
@@ -38,8 +39,10 @@ interface NavigationProps {
   onNavigate: (view: MainNavView) => void;
   onOpenCommandPalette: () => void;
   currentRole: AppRole;
-  onRoleChange: (role: AppRole) => void;
+  onRoleChange?: (role: AppRole) => void;
   brandName: string;
+  userEmail?: string;
+  onSignOut?: () => void;
 }
 
 export const Navigation: React.FC<NavigationProps> = ({
@@ -49,6 +52,8 @@ export const Navigation: React.FC<NavigationProps> = ({
   currentRole,
   onRoleChange,
   brandName,
+  userEmail,
+  onSignOut,
 }) => {
   const [mobileMenuOpen, setMobileMenuOpen] = React.useState(false);
 
@@ -123,26 +128,38 @@ export const Navigation: React.FC<NavigationProps> = ({
           })}
         </nav>
 
-        {/* Role Switcher & Operator Identity */}
+        {/* Role Display & Operator Identity (from server) */}
         <div className="p-3 border-t border-[#162445] bg-[#060c1c]">
           <div className="flex items-center justify-between mb-1.5 text-[11px] text-slate-400 font-medium">
             <span className="flex items-center gap-1.5">
               <ShieldCheck className="w-3.5 h-3.5 text-cyan-400" />
-              <span>Operator Role</span>
+              <span>Verified Server Role</span>
+            </span>
+            <span className={`px-1.5 py-0.5 rounded text-[10px] font-mono font-bold uppercase ${
+              currentRole === 'owner' ? 'bg-purple-950 text-purple-300 border border-purple-800' :
+              currentRole === 'admin' ? 'bg-cyan-950 text-cyan-300 border border-cyan-800' :
+              currentRole === 'operator' ? 'bg-emerald-950 text-emerald-300 border border-emerald-800' :
+              'bg-slate-800 text-slate-300 border border-slate-700'
+            }`}>
+              {currentRole}
             </span>
           </div>
-          <select
-            value={currentRole}
-            onChange={(e) => onRoleChange(e.target.value as AppRole)}
-            className="w-full bg-[#0d1a38] text-xs text-slate-200 border border-[#1e325c] rounded px-2.5 py-1.5 focus:outline-none focus:border-cyan-500 font-mono capitalize"
-          >
-            <option value="owner">Owner (Desmond - Full)</option>
-            <option value="admin">Admin (No keys/owner del)</option>
-            <option value="operator">Operator (No delete)</option>
-            <option value="viewer">Viewer (Read-only)</option>
-          </select>
+          {userEmail && (
+            <div className="text-[11px] text-slate-300 truncate font-mono mb-2" title={userEmail}>
+              {userEmail}
+            </div>
+          )}
+          {onSignOut && (
+            <button
+              onClick={onSignOut}
+              className="w-full flex items-center justify-center gap-1.5 py-1.5 px-2 bg-[#0d1a38] hover:bg-red-950/60 text-slate-300 hover:text-red-300 text-xs rounded border border-[#1e325c] hover:border-red-800 transition-colors"
+            >
+              <LogOut className="w-3 h-3" />
+              <span>Sign Out</span>
+            </button>
+          )}
           <div className="mt-2 flex items-center justify-between text-[10px] text-slate-500 font-mono">
-            <span>Node: Android/Web</span>
+            <span>Auth: Supabase</span>
             <span className="text-emerald-400">● Live</span>
           </div>
         </div>
@@ -199,18 +216,35 @@ export const Navigation: React.FC<NavigationProps> = ({
               ))}
             </div>
 
-            <div className="pt-3 border-t border-[#162445]">
-              <label className="block text-xs text-slate-400 mb-1">Simulate App Role:</label>
-              <select
-                value={currentRole}
-                onChange={(e) => onRoleChange(e.target.value as AppRole)}
-                className="w-full bg-[#0d1a38] text-xs text-slate-200 border border-[#1e325c] rounded p-2"
-              >
-                <option value="owner">Owner (Desmond - Full)</option>
-                <option value="admin">Admin</option>
-                <option value="operator">Operator</option>
-                <option value="viewer">Viewer</option>
-              </select>
+            <div className="pt-3 border-t border-[#162445] space-y-2">
+              <div className="flex items-center justify-between text-xs text-slate-400">
+                <span>Verified Server Role:</span>
+                <span className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase ${
+                  currentRole === 'owner' ? 'bg-purple-950 text-purple-300 border border-purple-800' :
+                  currentRole === 'admin' ? 'bg-cyan-950 text-cyan-300 border border-cyan-800' :
+                  currentRole === 'operator' ? 'bg-emerald-950 text-emerald-300 border border-emerald-800' :
+                  'bg-slate-800 text-slate-300 border border-slate-700'
+                }`}>
+                  {currentRole}
+                </span>
+              </div>
+              {userEmail && (
+                <div className="text-[11px] text-slate-300 truncate font-mono">
+                  {userEmail}
+                </div>
+              )}
+              {onSignOut && (
+                <button
+                  onClick={() => {
+                    setMobileMenuOpen(false);
+                    onSignOut();
+                  }}
+                  className="w-full mt-1 flex items-center justify-center gap-1.5 py-2 px-3 bg-red-950/40 hover:bg-red-950/70 text-red-200 text-xs rounded border border-red-800 transition-colors"
+                >
+                  <LogOut className="w-3.5 h-3.5" />
+                  <span>Sign Out</span>
+                </button>
+              )}
             </div>
           </div>
         </div>

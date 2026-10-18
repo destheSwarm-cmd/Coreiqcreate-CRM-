@@ -24,7 +24,7 @@ export const TableView: React.FC<TableViewProps> = ({
   const [csvInput, setCsvInput] = useState('');
 
   const filtered = clients
-    .filter((c) => !c.archived_at)
+    .filter((c) => !c.archived_at && !c.is_sample && c.id !== 'cli_sample_1')
     .filter((c) => {
       if (!searchQuery) return true;
       const q = searchQuery.toLowerCase();

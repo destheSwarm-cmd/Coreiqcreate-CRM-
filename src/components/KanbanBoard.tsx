@@ -57,10 +57,12 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
     reason: '',
   });
 
-  const activeEngagements = engagements.filter((e) => !e.archived_at);
+  const activeEngagements = engagements.filter(
+    (e) => !e.archived_at && e.client_id !== 'cli_sample_1'
+  );
 
   const filteredEngagements = activeEngagements.filter((e) => {
-    const client = clients.find((c) => c.id === e.client_id);
+    const client = clients.find((c) => c.id === e.client_id && !c.is_sample && c.id !== 'cli_sample_1');
     if (!client) return false;
     if (!searchQuery) return true;
     const q = searchQuery.toLowerCase();
@@ -193,7 +195,7 @@ export const KanbanBoard: React.FC<KanbanBoardProps> = ({
                     </span>
                   </div>
                   <span className="font-mono text-[10px] text-cyan-400 font-semibold">
-                    {stage.probability_pct}% MOCK
+                    {stage.probability_pct}%
                   </span>
                 </div>
                 <div className="flex items-center justify-between text-[10px] text-slate-400 font-mono">

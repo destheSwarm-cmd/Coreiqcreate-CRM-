@@ -31,6 +31,9 @@ import { PublicQuestionnaireView } from './components/PublicQuestionnaireView';
 import { PublicFeedbackView } from './components/PublicFeedbackView';
 import { PWAInstallButton } from './components/PWAInstallButton';
 import { CheckCircle2, AlertTriangle, Plus, Search } from 'lucide-react';
+import { supabase } from './lib/supabase';
+import { Session } from '@supabase/supabase-js';
+import { LoginView } from './components/LoginView';
 
 export function App() {
   // Check for public token-based route access
@@ -51,11 +54,15 @@ export function App() {
     return <PublicFeedbackView token={token} />;
   }
 
+  // Session & Auth State (Step 5: Show nothing until session exists)
+  const [session, setSession] = useState<Session | null>(null);
+  const [isSessionLoading, setIsSessionLoading] = useState(true);
+
   // Operator CRM Core State
   const [dbState, setDbState] = useState<DatabaseSchema | null>(null);
   const [currentView, setCurrentView] = useState<MainNavView>('pipeline');
   const [selectedClientId, setSelectedClientId] = useState<string | null>(null);
-  const [currentRole, setCurrentRole] = useState<AppRole>('owner');
+  const [currentRole, setCurrentRole] = useState<AppRole>('viewer');
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [liveToast, setLiveToast] = useState<{ message: string; actor: string } | null>(null);
   const [isOnline, setIsOnline] = useState(typeof navigator !== 'undefined' ? navigator.onLine : true);
@@ -66,9 +73,19 @@ export function App() {
   const [newClientIndustry, setNewClientIndustry] = useState('');
   const [newClientWebsite, setNewClientWebsite] = useState('');
 
-  // Fetch state on mount
+  // Track session and auth changes
   useEffect(() => {
-    fetchState();
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
+      setIsSessionLoading(false);
+    });
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, newSession) => {
+      setSession(newSession);
+      setIsSessionLoading(false);
+    });
 
     const handleOnline = () => setIsOnline(true);
     const handleOffline = () => setIsOnline(false);
@@ -88,21 +105,161 @@ export function App() {
     window.addEventListener('keydown', handleKeyDown);
 
     return () => {
+      subscription.unsubscribe();
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
       window.removeEventListener('keydown', handleKeyDown);
     };
   }, []);
 
+  // Fetch CRM board data and optional local db state whenever session is valid
+  useEffect(() => {
+    if (session) {
+      fetchState();
+    }
+  }, [session]);
+
   const fetchState = async () => {
+    if (!session) return;
     try {
-      const resp = await fetch('/api/db/state');
-      if (resp.ok) {
-        const json = await resp.json();
-        setDbState(json.data);
+      // 1. Load Supabase Pipeline, Clients, and Tasks from /api/crm/board with session token
+      const crmResp = await fetch('/api/crm/board', {
+        headers: {
+          Authorization: `Bearer ${session.access_token}`,
+        },
+      });
+
+      let crmData: any = null;
+      if (crmResp.ok) {
+        crmData = await crmResp.json();
+        if (crmData.role) {
+          setCurrentRole(crmData.role);
+        }
       }
+
+      // 2. If user has owner role, sync full local db state for pricing, products, and assets
+      let localData: any = null;
+      if (crmData?.role === 'owner' || currentRole === 'owner') {
+        try {
+          const dbResp = await fetch('/api/db/state', {
+            headers: {
+              Authorization: `Bearer ${session.access_token}`,
+            },
+          });
+          if (dbResp.ok) {
+            const json = await dbResp.json();
+            localData = json.data;
+          }
+        } catch {
+          // Non-blocking
+        }
+      }
+
+      // Merge real Supabase board records into dbState
+      setDbState((prev) => {
+        const base = localData || prev || {
+          settings: {
+            brand_name: 'CoreIQ CRM',
+            currency: 'ZAR',
+            tax_rate: 0.15,
+            quote_validity_days: 14,
+            quote_terms_md: '',
+            code_formats: {
+              client_prefix: 'CIQ-C-',
+              engagement_prefix: 'CIQ-E-',
+              quote_prefix: 'CIQ-Q-',
+              deliverable_prefix: 'CIQ-D-',
+              asset_prefix: 'CIQ-A-',
+            },
+            agent_discount_cap_pct: 10,
+            approval_threshold_pct: 20,
+            stale_days: 7,
+            working_timezone: 'Africa/Johannesburg',
+            weekly_build_hours: 40,
+            send_mode: 'draft',
+            theme_tokens: {
+              background: '#04091A',
+              surface: '#0A1329',
+              primary: '#00E5FF',
+              secondary: '#3B82F6',
+              warning: '#F59E0B',
+              danger: '#EF4444',
+              success: '#10B981',
+            },
+            visible_tabs: ['overview', 'requests', 'discovery', 'sampling', 'built', 'quotes', 'emails', 'activity', 'tasks', 'files'],
+          },
+          users: [],
+          pipeline_stages: [],
+          clients: [],
+          contacts: [],
+          engagements: [],
+          stage_history: [],
+          requests: [],
+          activities: [],
+          tasks: [],
+          custom_field_defs: [],
+          saved_views: [],
+          dashboard_layouts: [],
+          audit_log: [],
+          idempotency_keys: [],
+          questionnaire_templates: [],
+          questionnaires: [],
+          questionnaire_responses: [],
+          feedback: [],
+          sampling_costs: [],
+          deliverables: [],
+          products: [],
+          product_options: [],
+          price_tiers: [],
+          product_relations: [],
+          bundles: [],
+          bundle_items: [],
+          quotes: [],
+          quote_lines: [],
+          approvals: [],
+          build_briefs: [],
+          assets: [],
+          asset_usage: [],
+          email_accounts: [],
+          email_templates: [],
+          email_sequences: [],
+          sequence_enrollments: [],
+          email_messages: [],
+          suppression_list: [],
+          api_keys: [],
+          webhook_endpoints: [],
+          webhook_deliveries: [],
+          integrations: [],
+          playbooks: [],
+          nba_items: [],
+          ai_runs: [],
+          counters: { client: 1, engagement: 1, quote: 1, deliverable: 1, asset: 1 },
+        };
+
+        if (crmData) {
+          // Remove any seeded mock clients from Pipeline, Clients, and Tasks views
+          const liveClients = (crmData.clients || []).filter(
+            (c: any) => !c.is_sample && c.id !== 'cli_sample_1' && c.name !== 'Apex Logistics & Freight'
+          );
+          const liveEngagements = (crmData.engagements || []).filter(
+            (e: any) => !e.is_sample && e.client_id !== 'cli_sample_1'
+          );
+          const liveTasks = (crmData.tasks || []).filter(
+            (t: any) => t.client_id !== 'cli_sample_1'
+          );
+
+          return {
+            ...base,
+            pipeline_stages: crmData.stages && crmData.stages.length > 0 ? crmData.stages : base.pipeline_stages,
+            clients: liveClients,
+            engagements: liveEngagements,
+            tasks: liveTasks,
+          };
+        }
+        return base;
+      });
     } catch (e) {
-      console.warn('Failed to fetch DB state, using offline cache:', e);
+      console.warn('Failed to fetch CRM state:', e);
     }
   };
 
@@ -111,37 +268,47 @@ export function App() {
     setTimeout(() => setLiveToast(null), 3500);
   };
 
-  // Move Engagement Stage with mandatory reason
+  const handleSignOut = async () => {
+    await supabase.auth.signOut();
+    setSession(null);
+    setDbState(null);
+  };
+
+  // Move Engagement Stage with mandatory reason (via /api/crm/engagements/:id/move)
   const handleMoveEngagement = async (engagementId: string, toStageId: string, reason: string) => {
+    if (!session) return;
     try {
-      const resp = await fetch(`/v1/engagements/${engagementId}/move`, {
+      const resp = await fetch(`/api/crm/engagements/${engagementId}/move`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: 'Bearer ciq_crm_hermes_secret_sample_key_999',
+          Authorization: `Bearer ${session.access_token}`,
         },
         body: JSON.stringify({ to_stage_id: toStageId, reason }),
       });
       if (resp.ok) {
-        showToast(`Stage moved to ${toStageId}`, 'Desmond');
+        showToast(`Stage moved and activity logged`, 'Operator');
         fetchState();
+      } else {
+        const err = await resp.json();
+        showToast(err.message || 'Failed to move stage', 'Error');
       }
     } catch (err) {
       console.error('Failed to move stage:', err);
     }
   };
 
-  // Create New Client
+  // Create New Client (via /api/crm/clients)
   const handleCreateClientSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newClientName.trim()) return;
+    if (!newClientName.trim() || !session) return;
 
     try {
-      const resp = await fetch('/v1/clients', {
+      const resp = await fetch('/api/crm/clients', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: 'Bearer ciq_crm_hermes_secret_sample_key_999',
+          Authorization: `Bearer ${session.access_token}`,
         },
         body: JSON.stringify({
           name: newClientName,
@@ -153,66 +320,56 @@ export function App() {
 
       if (resp.ok) {
         const json = await resp.json();
-        const createdClient = json.data;
-
-        // Auto create first engagement at stage Outreach
-        await fetch('/api/db/update', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            table: 'engagements',
-            item: {
-              id: `eng_${Date.now()}`,
-              engagement_code: `CIQ-E-${String(dbState?.counters.engagement || 1).padStart(4, '0')}`,
-              client_id: createdClient.id,
-              title: `${createdClient.name} — Initial Journey`,
-              categories: ['AI Agent', 'Automation'],
-              stage_id: 'stg_1', // Outreach
-              stage_entered_at: new Date().toISOString(),
-              value_estimate: 15000,
-              currency: 'ZAR',
-              expected_close: null,
-              owner_actor: 'Desmond',
-              is_sampling: true,
-              outcome: null,
-              lost_reason: null,
-              custom: {},
-              archived_at: null,
-              created_at: new Date().toISOString(),
-              updated_at: new Date().toISOString(),
-            },
-          }),
-        });
-
-        showToast(`Client ${createdClient.name} created (${createdClient.client_code})`, 'Desmond');
+        const createdClient = json.data.client;
+        showToast(`Client ${createdClient.name} created (${createdClient.client_code})`, 'Operator');
         setNewClientName('');
         setNewClientIndustry('');
         setNewClientWebsite('');
         setShowNewClientModal(false);
         fetchState();
-        setSelectedClientId(createdClient.id);
+        if (createdClient.id) {
+          setSelectedClientId(createdClient.id);
+        }
+      } else {
+        const err = await resp.json();
+        showToast(err.message || 'Failed to create client', 'Error');
       }
     } catch (err) {
       console.error('Error creating client:', err);
     }
   };
 
-  // Toggle Task Status
+  // Toggle Task Status (via /api/crm/tasks/:id)
   const handleToggleTask = async (taskId: string) => {
-    if (!dbState) return;
+    if (!dbState || !session) return;
     const task = dbState.tasks.find((t: Task) => t.id === taskId);
     if (!task) return;
 
     const newStatus = task.status === 'done' ? 'open' : 'done';
-    await fetch('/api/db/update', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        table: 'tasks',
-        item: { ...task, status: newStatus },
-      }),
-    });
-    fetchState();
+    try {
+      const resp = await fetch(`/api/crm/tasks/${taskId}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({ status: newStatus }),
+      });
+      if (resp.ok) {
+        fetchState();
+      } else {
+        // Fallback to local state if offline
+        setDbState((prev) => {
+          if (!prev) return null;
+          return {
+            ...prev,
+            tasks: prev.tasks.map((t) => (t.id === taskId ? { ...t, status: newStatus } : t)),
+          };
+        });
+      }
+    } catch {
+      fetchState();
+    }
   };
 
   // Add Task
@@ -502,10 +659,23 @@ export function App() {
     fetchState();
   };
 
+  if (isSessionLoading) {
+    return (
+      <div className="min-h-screen bg-[#04091A] flex items-center justify-center p-6 text-cyan-400 font-mono text-xs">
+        Initializing CoreIQ CRM Session...
+      </div>
+    );
+  }
+
+  // Step 5: Show nothing until a session exists
+  if (!session) {
+    return <LoginView />;
+  }
+
   if (!dbState) {
     return (
       <div className="min-h-screen bg-[#04091A] flex items-center justify-center p-6 text-cyan-400 font-mono text-xs">
-        Booting CoreIQ CRM Operator Engine...
+        Loading CoreIQ CRM Workspace...
       </div>
     );
   }
@@ -527,7 +697,8 @@ export function App() {
         onNavigate={(v) => setCurrentView(v)}
         onOpenCommandPalette={() => setCommandPaletteOpen(true)}
         currentRole={currentRole}
-        onRoleChange={(role) => setCurrentRole(role)}
+        userEmail={session.user.email}
+        onSignOut={handleSignOut}
         brandName={dbState.settings.brand_name}
       />
 
@@ -633,7 +804,7 @@ export function App() {
             </div>
 
             <div className="space-y-2">
-              {dbState.tasks.map((task: Task) => (
+              {dbState.tasks.filter((t) => t.client_id !== 'cli_sample_1').map((task: Task) => (
                 <div
                   key={task.id}
                   className="p-3 bg-[#081126] border border-[#162445] rounded flex items-center justify-between text-xs"
