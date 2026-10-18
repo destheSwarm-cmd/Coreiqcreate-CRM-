@@ -1,7 +1,8 @@
 import express, { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
+import fs from 'fs';
 import path from 'path';
-import { createServer as createViteServer } from 'vite';
+import { createClient as createSupabaseClient, SupabaseClient } from '@supabase/supabase-js';
 import { db, generateToken } from './src/server/db';
 import { ALL_SCOPES, GRANTABLE_SCOPES, SCOPE_PRESETS, hasScope } from './src/server/scopes';
 import { computeLinePrice, computeQuoteTotals } from './src/server/pricingEngine';
@@ -11,6 +12,19 @@ import { Client, Contact, Engagement, Quote, QuoteLine, BuildBrief, RequestItem,
 
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+
+// Supabase Server Client (initialized from env using service role key, server-side only)
+const SUPABASE_URL = process.env.SUPABASE_URL || '';
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+
+export const supabaseServer: SupabaseClient | null = (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY)
+  ? createSupabaseClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+      auth: {
+        autoRefreshToken: false,
+        persistSession: false,
+      },
+    })
+  : null;
 
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
@@ -75,6 +89,339 @@ function requireApiAuth(requiredScope: string) {
     next();
   };
 }
+
+// -------------------------------------------------------------
+// BASIC API ROUTES (/api/v1/*) - STEP 5
+// -------------------------------------------------------------
+
+// Middleware checking Authorization: Bearer against api_keys (stubbed check verifying header is present)
+function requireV1Auth(req: Request, res: Response, next: NextFunction) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({
+      error: 'UNAUTHORIZED',
+      message: 'Authorization: Bearer header is required',
+    });
+  }
+  const token = authHeader.replace(/^Bearer\s+/, '').trim();
+  if (!token) {
+    return res.status(401).json({
+      error: 'UNAUTHORIZED',
+      message: 'Bearer token cannot be empty',
+    });
+  }
+  next();
+}
+
+async function generateClientCode(): Promise<string> {
+  if (supabaseServer) {
+    try {
+      const { count } = await supabaseServer.from('clients').select('id', { count: 'exact', head: true });
+      const nextNum = (count || 0) + 1;
+      return `CIQ-C-${String(nextNum).padStart(4, '0')}`;
+    } catch {
+      // Fall through to local db generator
+    }
+  }
+  return db.nextClientCode();
+}
+
+// GET /api/v1/health → { status: "ok", supabase: true/false based on a ping }
+app.get('/api/v1/health', requireV1Auth, async (_req: Request, res: Response) => {
+  let supabaseOk = false;
+  if (supabaseServer) {
+    try {
+      const { error } = await supabaseServer.from('pipeline_stages').select('id').limit(1);
+      if (!error) supabaseOk = true;
+    } catch {
+      supabaseOk = false;
+    }
+  }
+  res.json({ status: 'ok', supabase: supabaseOk });
+});
+
+// GET /api/v1/clients → list clients (not archived), paginated, filter by name
+app.get('/api/v1/clients', requireV1Auth, async (req: Request, res: Response) => {
+  try {
+    const page = Math.max(1, parseInt(req.query.page as string, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string, 10) || 20));
+    const nameFilter = typeof req.query.name === 'string' ? req.query.name.trim() : '';
+
+    if (supabaseServer) {
+      try {
+        let query = supabaseServer
+          .from('clients')
+          .select('*', { count: 'exact' })
+          .is('archived_at', null);
+
+        if (nameFilter) {
+          query = query.ilike('name', `%${nameFilter}%`);
+        }
+
+        const from = (page - 1) * limit;
+        const to = from + limit - 1;
+        const { data: clients, count, error } = await query
+          .range(from, to)
+          .order('created_at', { ascending: false });
+
+        if (!error && clients) {
+          return res.json({
+            data: clients,
+            pagination: {
+              page,
+              limit,
+              total: count || clients.length,
+              total_pages: Math.ceil((count || clients.length) / limit),
+            },
+          });
+        }
+      } catch (err) {
+        console.warn('Supabase clients query error, falling back to local DB:', err);
+      }
+    }
+
+    const currentDb = db.get();
+    let clients = currentDb.clients.filter((c) => !c.archived_at);
+    if (nameFilter) {
+      clients = clients.filter((c) => c.name.toLowerCase().includes(nameFilter.toLowerCase()));
+    }
+    const total = clients.length;
+    const paged = clients.slice((page - 1) * limit, page * limit);
+
+    return res.json({
+      data: paged,
+      pagination: {
+        page,
+        limit,
+        total,
+        total_pages: Math.ceil(total / limit),
+      },
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: 'INTERNAL_ERROR', message: err.message });
+  }
+});
+
+// POST /api/v1/clients → create client, generate client_code CIQ-C-NNNN server-side
+app.post('/api/v1/clients', requireV1Auth, async (req: Request, res: Response) => {
+  try {
+    const {
+      name,
+      type = 'company',
+      industry,
+      website,
+      country,
+      timezone,
+      source = 'api',
+      tags = [],
+      notes,
+    } = req.body;
+
+    if (!name || typeof name !== 'string' || !name.trim()) {
+      return res.status(400).json({ error: 'BAD_REQUEST', message: 'Field "name" is required' });
+    }
+
+    const clientCode = await generateClientCode();
+
+    if (supabaseServer) {
+      try {
+        const { data: newClient, error } = await supabaseServer
+          .from('clients')
+          .insert({
+            client_code: clientCode,
+            name: name.trim(),
+            type,
+            industry,
+            website,
+            country,
+            timezone,
+            source,
+            tags: Array.isArray(tags) ? tags : [tags].filter(Boolean),
+            notes,
+            health_score: 50,
+          })
+          .select()
+          .single();
+
+        if (!error && newClient) {
+          return res.status(201).json({ data: newClient });
+        }
+      } catch (err) {
+        console.warn('Supabase client insert error, falling back to local DB:', err);
+      }
+    }
+
+    // Local DB fallback
+    const newClient: Client = {
+      id: `cli_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
+      client_code: clientCode,
+      name: name.trim(),
+      type: type as any,
+      industry: industry || 'Technology',
+      website: website || '',
+      country: country || 'South Africa',
+      timezone: timezone || 'Africa/Johannesburg',
+      source: source || 'api',
+      source_detail: 'REST API v1',
+      owner_actor: 'Desmond',
+      health_score: 50,
+      health_reasons: ['Initial creation via API v1'],
+      tags: Array.isArray(tags) ? tags : [tags].filter(Boolean),
+      custom: {},
+      notes: notes || '',
+      archived_at: null,
+      created_by_actor: 'api_v1',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    const currentDb = db.get();
+    currentDb.clients.push(newClient);
+    db.logAudit({
+      actor_type: 'agent',
+      actor_name: 'api_v1',
+      api_key_id: null,
+      action: 'client.created',
+      entity_type: 'clients',
+      entity_id: newClient.id,
+      before: null,
+      after: newClient,
+      request_id: `req_${Date.now()}`,
+      idempotency_key: null,
+    });
+    db.save();
+
+    return res.status(201).json({ data: newClient });
+  } catch (err: any) {
+    return res.status(500).json({ error: 'INTERNAL_ERROR', message: err.message });
+  }
+});
+
+// GET /api/v1/clients/:id → full client record with contacts and latest 10 activities
+app.get('/api/v1/clients/:id', requireV1Auth, async (req: Request, res: Response) => {
+  try {
+    const id = req.params.id;
+
+    if (supabaseServer) {
+      try {
+        const { data: client, error } = await supabaseServer
+          .from('clients')
+          .select('*')
+          .or(`id.eq.${id},client_code.eq.${id}`)
+          .single();
+
+        if (!error && client) {
+          const { data: contacts } = await supabaseServer
+            .from('contacts')
+            .select('*')
+            .eq('client_id', client.id);
+
+          const { data: activities } = await supabaseServer
+            .from('activities')
+            .select('*')
+            .eq('client_id', client.id)
+            .order('occurred_at', { ascending: false })
+            .limit(10);
+
+          return res.json({
+            data: {
+              ...client,
+              contacts: contacts || [],
+              activities: activities || [],
+            },
+          });
+        }
+      } catch (err) {
+        console.warn('Supabase get client error, falling back to local DB:', err);
+      }
+    }
+
+    const currentDb = db.get();
+    const client = currentDb.clients.find((c) => c.id === id || c.client_code === id);
+    if (!client) {
+      return res.status(404).json({ error: 'NOT_FOUND', message: 'Client not found' });
+    }
+
+    const contacts = currentDb.contacts.filter((c) => c.client_id === client.id);
+    const activities = currentDb.activities
+      .filter((a) => a.client_id === client.id)
+      .sort((a, b) => new Date(b.occurred_at).getTime() - new Date(a.occurred_at).getTime())
+      .slice(0, 10);
+
+    return res.json({
+      data: {
+        ...client,
+        contacts,
+        activities,
+      },
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: 'INTERNAL_ERROR', message: err.message });
+  }
+});
+
+// GET /api/v1/pipeline → all stages with their engagement counts and total value
+app.get('/api/v1/pipeline', requireV1Auth, async (_req: Request, res: Response) => {
+  try {
+    if (supabaseServer) {
+      try {
+        const { data: stages, error: stgError } = await supabaseServer
+          .from('pipeline_stages')
+          .select('*')
+          .order('position', { ascending: true });
+
+        if (!stgError && stages && stages.length > 0) {
+          const { data: engagements } = await supabaseServer
+            .from('engagements')
+            .select('stage_id, value_estimate')
+            .is('archived_at', null);
+
+          const result = stages.map((stg) => {
+            const stageEngagements = (engagements || []).filter((e) => e.stage_id === stg.id);
+            const count = stageEngagements.length;
+            const total_value = stageEngagements.reduce((sum, e) => sum + (Number(e.value_estimate) || 0), 0);
+            return {
+              stage_id: stg.id,
+              key: stg.key,
+              name: stg.name,
+              position: stg.position,
+              color: stg.color,
+              is_terminal: stg.is_terminal,
+              engagement_count: count,
+              total_value: Math.round(total_value * 100) / 100,
+            };
+          });
+
+          return res.json({ data: result });
+        }
+      } catch (err) {
+        console.warn('Supabase pipeline stages error, falling back to local DB:', err);
+      }
+    }
+
+    const currentDb = db.get();
+    const activeEngagements = currentDb.engagements.filter((e) => !e.archived_at);
+    const result = currentDb.pipeline_stages.map((stg) => {
+      const stageEngagements = activeEngagements.filter((e) => e.stage_id === stg.id);
+      const count = stageEngagements.length;
+      const total_value = stageEngagements.reduce((sum, e) => sum + (e.value_estimate || 0), 0);
+      return {
+        stage_id: stg.id,
+        key: stg.key,
+        name: stg.name,
+        position: stg.position,
+        color: stg.color,
+        is_terminal: stg.is_terminal,
+        engagement_count: count,
+        total_value: Math.round(total_value * 100) / 100,
+      };
+    });
+
+    return res.json({ data: result });
+  } catch (err: any) {
+    return res.status(500).json({ error: 'INTERNAL_ERROR', message: err.message });
+  }
+});
 
 // -------------------------------------------------------------
 // 1. OPENAPI 3.0 SPECIFICATION (/v1/openapi.json)
@@ -1366,6 +1713,9 @@ app.get('/api/verification-report', async (req, res) => {
 async function startServer() {
   const isProd = process.env.NODE_ENV === 'production';
   if (!isProd) {
+    // Dynamic import prevents esbuild bundling dev-only Vite into production server build
+    const vitePkg = 'vite';
+    const { createServer: createViteServer } = await import(vitePkg);
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
@@ -1374,10 +1724,20 @@ async function startServer() {
   } else {
     const distPath = path.resolve(process.cwd(), 'dist');
     app.use(express.static(distPath));
-    app.get('*', (req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
   }
+
+  // Catch-all route that serves dist/index.html for any non-API GET request (needed for React Router in production)
+  app.get('*', (req: Request, res: Response, next: NextFunction) => {
+    if (req.path.startsWith('/api') || req.path.startsWith('/v1')) {
+      return next();
+    }
+    const distPath = path.resolve(process.cwd(), 'dist');
+    const indexPath = path.join(distPath, 'index.html');
+    if (fs.existsSync(indexPath)) {
+      return res.sendFile(indexPath);
+    }
+    return next();
+  });
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`CoreIQ CRM server running at http://0.0.0.0:${PORT}`);

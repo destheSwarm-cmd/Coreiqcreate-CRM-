@@ -343,6 +343,30 @@
       "created_by_actor": "Intake Bot",
       "created_at": "2026-10-17T01:41:13.018Z",
       "updated_at": "2026-10-17T01:41:13.018Z"
+    },
+    {
+      "id": "cli_1792341154004_d9a147",
+      "client_code": "CIQ-C-0004",
+      "name": "Meridian Maritime",
+      "type": "company",
+      "industry": "Shipping",
+      "website": "",
+      "country": "South Africa",
+      "timezone": "Africa/Johannesburg",
+      "source": "api",
+      "source_detail": "REST API v1",
+      "owner_actor": "Desmond",
+      "health_score": 50,
+      "health_reasons": [
+        "Initial creation via API v1"
+      ],
+      "tags": [],
+      "custom": {},
+      "notes": "",
+      "archived_at": null,
+      "created_by_actor": "api_v1",
+      "created_at": "2026-10-18T16:32:34.004Z",
+      "updated_at": "2026-10-18T16:32:34.004Z"
     }
   ],
   "contacts": [
@@ -1612,6 +1636,43 @@
       },
       "request_id": "req_1792201278812_022c43",
       "idempotency_key": null
+    },
+    {
+      "id": "aud_1792341154004_f719a604",
+      "at": "2026-10-18T16:32:34.004Z",
+      "actor_type": "agent",
+      "actor_name": "api_v1",
+      "api_key_id": null,
+      "action": "client.created",
+      "entity_type": "clients",
+      "entity_id": "cli_1792341154004_d9a147",
+      "before": null,
+      "after": {
+        "id": "cli_1792341154004_d9a147",
+        "client_code": "CIQ-C-0004",
+        "name": "Meridian Maritime",
+        "type": "company",
+        "industry": "Shipping",
+        "website": "",
+        "country": "South Africa",
+        "timezone": "Africa/Johannesburg",
+        "source": "api",
+        "source_detail": "REST API v1",
+        "owner_actor": "Desmond",
+        "health_score": 50,
+        "health_reasons": [
+          "Initial creation via API v1"
+        ],
+        "tags": [],
+        "custom": {},
+        "notes": "",
+        "archived_at": null,
+        "created_by_actor": "api_v1",
+        "created_at": "2026-10-18T16:32:34.004Z",
+        "updated_at": "2026-10-18T16:32:34.004Z"
+      },
+      "request_id": "req_1792341154004",
+      "idempotency_key": null
     }
   ],
   "webhook_endpoints": [
@@ -1798,7 +1859,7 @@
   ],
   "ai_runs": [],
   "counters": {
-    "client": 3,
+    "client": 4,
     "engagement": 3,
     "quote": 1,
     "deliverable": 1,
