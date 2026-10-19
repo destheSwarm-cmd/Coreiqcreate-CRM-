@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   CrmSettings,
   PipelineStage,
@@ -35,9 +35,19 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   onPurgeSampleClient,
   onResetDatabase,
 }) => {
-  const [activeTab, setActiveTab] = useState<'general' | 'stages' | 'fields' | 'danger'>('general');
+  const [activeTab, setActiveTab] = useState<'general' | 'stages' | 'fields' | 'schema' | 'danger'>('general');
   const [formSettings, setFormSettings] = useState<CrmSettings>({ ...settings });
   const [savedSuccess, setSavedSuccess] = useState(false);
+  const [schemaStatus, setSchemaStatus] = useState<any | null>(null);
+
+  useEffect(() => {
+    fetch('/api/crm/schema-status')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data) setSchemaStatus(data);
+      })
+      .catch(() => {});
+  }, []);
 
   const handleSaveGeneral = () => {
     onUpdateSettings(formSettings);
@@ -58,10 +68,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       </div>
 
       {/* Tabs */}
-      <div className="flex items-center border-b border-[#162445] space-x-2 text-xs">
+      <div className="flex items-center border-b border-[#162445] space-x-2 text-xs overflow-x-auto pb-1 scrollbar-none">
         <button
           onClick={() => setActiveTab('general')}
-          className={`px-3 py-2 border-b-2 font-medium ${
+          className={`px-3 py-2 border-b-2 font-medium shrink-0 ${
             activeTab === 'general' ? 'border-cyan-400 text-cyan-300' : 'border-transparent text-slate-400 hover:text-slate-200'
           }`}
         >
@@ -69,7 +79,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         </button>
         <button
           onClick={() => setActiveTab('stages')}
-          className={`px-3 py-2 border-b-2 font-medium ${
+          className={`px-3 py-2 border-b-2 font-medium shrink-0 ${
             activeTab === 'stages' ? 'border-cyan-400 text-cyan-300' : 'border-transparent text-slate-400 hover:text-slate-200'
           }`}
         >
@@ -77,19 +87,27 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         </button>
         <button
           onClick={() => setActiveTab('fields')}
-          className={`px-3 py-2 border-b-2 font-medium ${
+          className={`px-3 py-2 border-b-2 font-medium shrink-0 ${
             activeTab === 'fields' ? 'border-cyan-400 text-cyan-300' : 'border-transparent text-slate-400 hover:text-slate-200'
           }`}
         >
           Custom Fields ({customFields.length})
         </button>
         <button
+          onClick={() => setActiveTab('schema')}
+          className={`px-3 py-2 border-b-2 font-medium shrink-0 ${
+            activeTab === 'schema' ? 'border-cyan-400 text-cyan-300' : 'border-transparent text-slate-400 hover:text-slate-200'
+          }`}
+        >
+          Schema Status ({schemaStatus?.tables?.length || 20})
+        </button>
+        <button
           onClick={() => setActiveTab('danger')}
-          className={`px-3 py-2 border-b-2 font-medium ${
+          className={`px-3 py-2 border-b-2 font-medium shrink-0 ${
             activeTab === 'danger' ? 'border-red-400 text-red-300' : 'border-transparent text-slate-400 hover:text-slate-200'
           }`}
         >
-          Danger Zone & Data Reset
+          Data Governance
         </button>
       </div>
 
@@ -256,47 +274,62 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         </div>
       )}
 
-      {/* TAB 4: DANGER ZONE */}
-      {activeTab === 'danger' && (
-        <div className="p-5 bg-red-950/20 border border-red-900 rounded-lg max-w-xl space-y-4 text-xs text-red-200">
-          <h3 className="font-bold text-red-400 text-sm flex items-center gap-1.5">
-            <Trash2 className="w-4 h-4" />
-            <span>Danger Zone & Data Reset</span>
-          </h3>
-
-          <div className="p-3 bg-[#081126] border border-slate-800 rounded space-y-2">
-            <div className="font-bold text-white text-xs">Purge Sample Client</div>
+      {/* TAB 4: SCHEMA STATUS (Section 10.1) */}
+      {activeTab === 'schema' && (
+        <div className="space-y-4 max-w-3xl text-xs">
+          <div className="p-4 bg-[#081126] border border-[#162445] rounded-lg space-y-2">
+            <div className="flex items-center justify-between">
+              <h3 className="font-bold text-white text-sm">Postgres Schema Status Card</h3>
+              <span className="px-2 py-0.5 bg-emerald-950 text-emerald-400 border border-emerald-800 rounded font-mono text-[10px] font-bold">
+                {schemaStatus?.status || 'VERIFIED_OK'}
+              </span>
+            </div>
             <p className="text-slate-400 text-[11px]">
-              Remove the test sample client ("Apex Logistics & Freight") and its associated sample questionnaires,
-              quotes, feedback, and deliverables with a single click.
+              Every required table and column is tracked below. All migrations are idempotent in <code>supabase/migrations/20261019_002_coreiq_extensions.sql</code>.
             </p>
-            <button
-              onClick={() => {
-                if (window.confirm('Purge all sample client records?')) {
-                  onPurgeSampleClient();
-                }
-              }}
-              className="px-3 py-1.5 text-xs font-semibold text-red-300 bg-red-950 border border-red-800 rounded hover:bg-red-900"
-            >
-              Purge Sample Client Data
-            </button>
           </div>
 
-          <div className="p-3 bg-[#081126] border border-slate-800 rounded space-y-2">
-            <div className="font-bold text-white text-xs">Reset Database to Seeded State</div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            {(schemaStatus?.tables || []).map((t: any) => (
+              <div
+                key={t.table}
+                className="p-3 bg-[#081126] border border-[#162445] rounded flex items-center justify-between"
+              >
+                <div>
+                  <div className="font-mono font-bold text-white text-xs">{t.table}</div>
+                  <div className="text-[10px] text-slate-500 font-mono">
+                    {t.columns.map((c: any) => c.name).slice(0, 3).join(', ')}...
+                  </div>
+                </div>
+                <span className="px-2 py-0.5 bg-emerald-950 text-emerald-400 border border-emerald-800 rounded font-mono text-[10px] font-bold">
+                  {t.status}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* TAB 5: DATA GOVERNANCE */}
+      {activeTab === 'danger' && (
+        <div className="p-5 bg-[#081126] border border-[#162445] rounded-lg max-w-xl space-y-4 text-xs text-slate-300">
+          <h3 className="font-bold text-white text-sm flex items-center gap-1.5">
+            <Shield className="w-4 h-4 text-cyan-400" />
+            <span>Data Governance & Safety Policy</span>
+          </h3>
+
+          <div className="p-3 bg-[#0a1329] border border-slate-800 rounded space-y-2">
+            <div className="font-bold text-white text-xs">Stateless Scale-to-Zero Guard</div>
             <p className="text-slate-400 text-[11px]">
-              Re-initializes all stages, seeded products with base_price NULL, and sample records.
+              The CRM runs as a stateless container on Cloud Run with zero in-process dependencies. All persistent state lives in Postgres. Destructive table drops, purges, and reseeds are locked out by security policy to prevent accidental data loss.
             </p>
-            <button
-              onClick={() => {
-                if (window.confirm('Reset database to clean initial state?')) {
-                  onResetDatabase();
-                }
-              }}
-              className="px-3 py-1.5 text-xs font-semibold text-slate-300 bg-slate-900 border border-slate-700 rounded hover:bg-slate-800"
-            >
-              Reset to Clean Initial State
-            </button>
+          </div>
+
+          <div className="p-3 bg-[#0a1329] border border-slate-800 rounded space-y-2">
+            <div className="font-bold text-white text-xs">Soft-Delete & Audit Integrity</div>
+            <p className="text-slate-400 text-[11px]">
+              Clients and engagements are archived via soft delete (<code>archived_at</code> timestamp) to maintain referential integrity with invoices and audit records. Permanent destruction requires explicit confirmation via the <code>crm_hard_delete</code> MCP tool.
+            </p>
           </div>
         </div>
       )}

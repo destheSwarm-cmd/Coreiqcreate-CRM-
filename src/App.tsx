@@ -22,6 +22,7 @@ import { AssetLibraryView } from './components/AssetLibraryView';
 import { ApiAgentConnectView } from './components/ApiAgentConnectView';
 import { VerificationReportView } from './components/VerificationReportView';
 import { SettingsView } from './components/SettingsView';
+import { PricingTermsView } from './components/PricingTermsView';
 import { TableView } from './components/TableView';
 import { CalendarView } from './components/CalendarView';
 import { DashboardView } from './components/DashboardView';
@@ -873,6 +874,14 @@ export function App() {
         )}
 
         {currentView === 'verification' && <VerificationReportView />}
+
+        {currentView === 'pricing_terms' && (
+          <PricingTermsView
+            clients={dbState.clients}
+            userRole={currentRole}
+            onShowToast={showToast}
+          />
+        )}
 
         {currentView === 'settings' && (
           <SettingsView

@@ -46,6 +46,13 @@ import {
   AiRun,
   AppRole,
   UserProfile,
+  BusinessSettings,
+  Invoice,
+  InvoiceItem,
+  Payment,
+  Retainer,
+  Milestone,
+  PushSubscriptionRecord,
 } from '../types/crm';
 
 export interface DatabaseSchema {
@@ -92,6 +99,14 @@ export interface DatabaseSchema {
   playbooks: Playbook[];
   nba_items: NbaItem[];
   ai_runs: AiRun[];
+  business_settings: BusinessSettings;
+  invoices: Invoice[];
+  invoice_items: InvoiceItem[];
+  payments: Payment[];
+  retainers: Retainer[];
+  milestones: Milestone[];
+  push_subscriptions: PushSubscriptionRecord[];
+  idempotency_keys: { key: string; response: any; expires_at: string }[];
   counters: {
     client: number;
     engagement: number;
@@ -99,6 +114,8 @@ export interface DatabaseSchema {
     deliverable: number;
     asset: number;
     request_seq: number;
+    invoice: number;
+    project: number;
   };
 }
 
@@ -1328,6 +1345,14 @@ Desmond`,
     playbooks: seededPlaybooks,
     nba_items: [sampleNba],
     ai_runs: [],
+    business_settings: defaultBusinessSettings,
+    invoices: [],
+    invoice_items: [],
+    payments: [],
+    retainers: [],
+    milestones: [],
+    push_subscriptions: [],
+    idempotency_keys: [],
     counters: {
       client: 1,
       engagement: 1,
@@ -1335,9 +1360,72 @@ Desmond`,
       deliverable: 1,
       asset: 5,
       request_seq: 1,
+      invoice: 1,
+      project: 0,
     },
   };
 }
+
+export const defaultBusinessSettings: BusinessSettings = {
+  id: '00000000-0000-0000-0000-000000000001',
+  trading_name: 'CoreIQ Create',
+  tagline: 'Ideas | Intelligence | Action',
+  email: 'operator@coreiq.com',
+  website: 'https://coreiq.com',
+  address: 'Johannesburg, South Africa',
+  registration_number: '',
+  vat_number: '',
+  vat_enabled: false,
+  vat_rate: 0.15,
+  logo_url: '',
+  currency: 'ZAR',
+  currency_symbol: 'R',
+  payment_due_days: 7,
+  quote_validity_days: 14,
+  deposit_pct: 50,
+  invoice_prefix: 'CIQ-',
+  quote_prefix: 'CIQ-Q-',
+  project_prefix: 'CIQ-P-',
+  timezone: 'Africa/Johannesburg',
+  next_invoice_number: 2,
+  next_quote_number: 1,
+  payment_methods: [
+    {
+      id: 'eft',
+      type: 'eft',
+      label: 'Electronic Funds Transfer (EFT)',
+      enabled: true,
+      rows: [
+        { label: 'Bank', value: '' },
+        { label: 'Account Holder', value: '' },
+        { label: 'Account Type', value: '' },
+        { label: 'Account Number', value: '' },
+        { label: 'Branch Code', value: '' },
+      ],
+      instructions: 'Please use invoice number as payment reference and send POP to operator@coreiq.com',
+    },
+  ],
+  terms_blocks: {
+    payment_terms: 'Starter text: review before use. Payment is due within 7 days of invoice date.',
+    deposit_cancellation: 'Starter text: review before use. A 50% deposit is required before build initiation. Work is non-refundable once started.',
+    scope_revisions: 'Starter text: review before use. Specifications detailed in the Build Brief govern scope. Extra revisions billed at standard catalog rates.',
+    delivery_maintenance: 'Starter text: review before use. Handover includes repository access. Maintenance retainers available separately.',
+    late_payment: 'Starter text: review before use. Overdue invoices incur 2% per month penalty interest.',
+    general: 'Starter text: review before use. South African commercial law applies.',
+  },
+  agents_paused: false,
+  send_mode: 'draft',
+  followup_min_hours: 24,
+  followup_max_per_stage: 3,
+  invoice_reminder_days: [2, -1, -7, -14],
+  quote_followup_days: 3,
+  push_events: {
+    new_lead: true,
+    money_in: true,
+    build_needed: true,
+    retainer_due: true,
+  },
+};
 
 class DatabaseManager {
   private data: DatabaseSchema;
@@ -1354,7 +1442,20 @@ class DatabaseManager {
       }
       if (fs.existsSync(DB_PATH)) {
         const raw = fs.readFileSync(DB_PATH, 'utf-8');
-        return JSON.parse(raw);
+        const loaded = JSON.parse(raw);
+        // Additive fields ensure Cloud Run & local memory persistence
+        if (!loaded.business_settings) loaded.business_settings = { ...defaultBusinessSettings };
+        if (!loaded.invoices) loaded.invoices = [];
+        if (!loaded.invoice_items) loaded.invoice_items = [];
+        if (!loaded.payments) loaded.payments = [];
+        if (!loaded.retainers) loaded.retainers = [];
+        if (!loaded.milestones) loaded.milestones = [];
+        if (!loaded.push_subscriptions) loaded.push_subscriptions = [];
+        if (!loaded.idempotency_keys) loaded.idempotency_keys = [];
+        if (!loaded.counters) loaded.counters = {};
+        if (loaded.counters.invoice === undefined) loaded.counters.invoice = 1;
+        if (loaded.counters.project === undefined) loaded.counters.project = 0;
+        return loaded;
       }
     } catch (e) {
       console.warn('Failed to read db file, initializing with defaults:', e);
@@ -1383,6 +1484,24 @@ class DatabaseManager {
     return this.data;
   }
 
+  public getBusinessSettings(): BusinessSettings {
+    if (!this.data.business_settings) {
+      this.data.business_settings = { ...defaultBusinessSettings };
+      this.save();
+    }
+    return this.data.business_settings;
+  }
+
+  public updateBusinessSettings(updates: Partial<BusinessSettings>): BusinessSettings {
+    this.data.business_settings = {
+      ...this.getBusinessSettings(),
+      ...updates,
+      updated_at: new Date().toISOString(),
+    };
+    this.save();
+    return this.data.business_settings;
+  }
+
   // Sequential code generators
   public nextClientCode(): string {
     this.data.counters.client += 1;
@@ -1396,6 +1515,26 @@ class DatabaseManager {
     this.save();
     const num = String(this.data.counters.engagement).padStart(4, '0');
     return `${this.data.settings.code_formats.engagement_prefix || 'CIQ-E-'}${num}`;
+  }
+
+  public nextHumanEngagementCode(): string {
+    this.data.counters.project = (this.data.counters.project || 0) + 1;
+    this.save();
+    const num = String(this.data.counters.project).padStart(4, '0');
+    return `${this.data.business_settings?.project_prefix || 'CIQ-P-'}${num}`;
+  }
+
+  public nextInvoiceCode(): string {
+    const current = this.data.business_settings?.next_invoice_number || (this.data.counters.invoice || 1) + 1;
+    const num = String(current).padStart(4, '0');
+    const prefix = this.data.business_settings?.invoice_prefix || 'CIQ-';
+    const code = `${prefix}${num}`;
+    if (this.data.business_settings) {
+      this.data.business_settings.next_invoice_number = current + 1;
+    }
+    this.data.counters.invoice = current;
+    this.save();
+    return code;
   }
 
   public nextQuoteCode(version: number = 1): string {

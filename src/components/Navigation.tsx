@@ -17,6 +17,7 @@ import {
   Layers,
   LayoutDashboard,
   LogOut,
+  Receipt,
 } from 'lucide-react';
 import { PWAInstallButton } from './PWAInstallButton';
 import { AppRole } from '../types/crm';
@@ -32,7 +33,8 @@ export type MainNavView =
   | 'assets'
   | 'api_agent'
   | 'verification'
-  | 'settings';
+  | 'settings'
+  | 'pricing_terms';
 
 interface NavigationProps {
   currentView: MainNavView;
@@ -68,6 +70,7 @@ export const Navigation: React.FC<NavigationProps> = ({
     { id: 'assets', label: 'Asset Library', icon: <Boxes className="w-4 h-4" /> },
     { id: 'api_agent', label: 'MCP & Agent Hub', icon: <Bot className="w-4 h-4" /> },
     { id: 'verification', label: 'Part C Verification', icon: <FileCheck2 className="w-4 h-4" /> },
+    { id: 'pricing_terms', label: 'Pricing & Terms', icon: <Receipt className="w-4 h-4" /> },
     { id: 'settings', label: 'Settings', icon: <Settings className="w-4 h-4" /> },
   ];
 

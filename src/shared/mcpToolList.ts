@@ -527,4 +527,311 @@ export const MCP_TOOLS: McpToolDefinition[] = [
       required: ['entity_type', 'entity_id', 'confirm'],
     },
   },
+  // Invoicing & Commercial Documents
+  {
+    name: 'crm_create_invoice',
+    description: 'Create a new invoice with line items, calculating subtotal, VAT, and total due',
+    requiredScope: 'invoices:write',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        client_id: { type: 'string', description: 'Client ID or Code' },
+        engagement_id: { type: 'string', description: 'Optional associated engagement' },
+        quote_id: { type: 'string', description: 'Optional associated quote' },
+        due_days: { type: 'number', description: 'Payment due in days (default from settings)' },
+        items: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              description: { type: 'string' },
+              sub_description: { type: 'string' },
+              qty: { type: 'number' },
+              unit_price: { type: 'number' },
+              discount_pct: { type: 'number' },
+            },
+            required: ['description', 'unit_price'],
+          },
+        },
+        notes: { type: 'string' },
+        is_historical: { type: 'boolean', description: 'Flag if recording historical invoice outside CRM' },
+        custom_invoice_number: { type: 'string', description: 'Custom invoice number if recording historical' },
+      },
+      required: ['client_id', 'items'],
+    },
+  },
+  {
+    name: 'crm_get_invoice',
+    description: 'Retrieve complete invoice card including items, payment snapshots, and balance',
+    requiredScope: 'invoices:read',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        invoice_id: { type: 'string', description: 'Invoice ID or Invoice Number (e.g. CIQ-0002)' },
+      },
+      required: ['invoice_id'],
+    },
+  },
+  {
+    name: 'crm_list_invoices',
+    description: 'List invoices filtered by client_id, status, or historical flag',
+    requiredScope: 'invoices:read',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        client_id: { type: 'string' },
+        status: { type: 'string', enum: ['draft', 'sent', 'partially_paid', 'paid', 'overdue', 'void'] },
+        limit: { type: 'number' },
+      },
+    },
+  },
+  {
+    name: 'crm_update_invoice',
+    description: 'Update status, due date, or notes on an invoice',
+    requiredScope: 'invoices:write',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        invoice_id: { type: 'string' },
+        status: { type: 'string', enum: ['draft', 'sent', 'partially_paid', 'paid', 'overdue', 'void'] },
+        due_date: { type: 'string' },
+        notes: { type: 'string' },
+      },
+      required: ['invoice_id'],
+    },
+  },
+  {
+    name: 'crm_record_payment',
+    description: 'Record payment received against an invoice; updates balance, marks status, and triggers push',
+    requiredScope: 'payments:write',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        invoice_id: { type: 'string' },
+        amount: { type: 'number' },
+        payment_method: { type: 'string', description: 'e.g. EFT, Wise, PayPal, PayFast' },
+        reference: { type: 'string', description: 'Bank transaction reference or receipt number' },
+        notes: { type: 'string' },
+      },
+      required: ['invoice_id', 'amount', 'payment_method'],
+    },
+  },
+  {
+    name: 'crm_generate_invoice_pdf',
+    description: 'Generate on-demand in-memory PDF for an invoice returning Base64 data to attach to emails',
+    requiredScope: 'invoices:read',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        invoice_id: { type: 'string' },
+      },
+      required: ['invoice_id'],
+    },
+  },
+  {
+    name: 'crm_generate_quote_pdf',
+    description: 'Generate on-demand in-memory PDF for a quote returning Base64 data to attach to emails',
+    requiredScope: 'quotes:read',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        quote_id: { type: 'string' },
+      },
+      required: ['quote_id'],
+    },
+  },
+  {
+    name: 'crm_mark_document_sent',
+    description: 'Mark a quote or invoice as dispatched; logs channel, recipient, and timeline activity',
+    requiredScope: 'invoices:write',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        document_type: { type: 'string', enum: ['invoice', 'quote'] },
+        document_id: { type: 'string' },
+        channel: { type: 'string', enum: ['email', 'whatsapp', 'manual'] },
+        recipient: { type: 'string' },
+      },
+      required: ['document_type', 'document_id'],
+    },
+  },
+  {
+    name: 'crm_accept_quote',
+    description: 'Mark quote accepted; generates technical build brief and moves engagement to Won: Building',
+    requiredScope: 'quotes:write',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        quote_id: { type: 'string' },
+        accepted_by_name: { type: 'string' },
+        acceptance_note: { type: 'string' },
+      },
+      required: ['quote_id'],
+    },
+  },
+  {
+    name: 'crm_approve_quote',
+    description: 'Approve a quote that requires pricing approval due to exceeding agent discount limits',
+    requiredScope: 'quotes:write',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        quote_id: { type: 'string' },
+        reason: { type: 'string' },
+      },
+      required: ['quote_id'],
+    },
+  },
+  // Retainers
+  {
+    name: 'crm_create_retainer',
+    description: 'Create a recurring retainer agreement for recurring maintenance or advisory',
+    requiredScope: 'retainers:write',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        client_id: { type: 'string' },
+        engagement_id: { type: 'string' },
+        description: { type: 'string' },
+        amount: { type: 'number' },
+        cycle: { type: 'string', enum: ['monthly', 'quarterly', 'annual'] },
+        start_date: { type: 'string' },
+        notes: { type: 'string' },
+      },
+      required: ['client_id', 'description', 'amount', 'cycle'],
+    },
+  },
+  {
+    name: 'crm_list_retainers',
+    description: 'List active and scheduled retainers with upcoming billing dates',
+    requiredScope: 'retainers:read',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        client_id: { type: 'string' },
+        status: { type: 'string', enum: ['active', 'paused', 'ended'] },
+      },
+    },
+  },
+  {
+    name: 'crm_generate_retainer_invoice',
+    description: 'Generate the next scheduled invoice for an active retainer agreement',
+    requiredScope: 'retainers:write',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        retainer_id: { type: 'string' },
+      },
+      required: ['retainer_id'],
+    },
+  },
+  // Milestones & Delivery
+  {
+    name: 'crm_list_milestones',
+    description: 'List delivery checklist milestones for an engagement in Won: Building',
+    requiredScope: 'milestones:read',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        engagement_id: { type: 'string' },
+      },
+      required: ['engagement_id'],
+    },
+  },
+  {
+    name: 'crm_create_milestone',
+    description: 'Create a build delivery milestone task for an engagement',
+    requiredScope: 'milestones:write',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        engagement_id: { type: 'string' },
+        title: { type: 'string' },
+        description: { type: 'string' },
+        due_date: { type: 'string' },
+        sort_order: { type: 'number' },
+      },
+      required: ['engagement_id', 'title'],
+    },
+  },
+  {
+    name: 'crm_update_milestone',
+    description: 'Update status of a delivery milestone (todo, in_progress, blocked, done)',
+    requiredScope: 'milestones:write',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        milestone_id: { type: 'string' },
+        status: { type: 'string', enum: ['todo', 'in_progress', 'blocked', 'done'] },
+      },
+      required: ['milestone_id', 'status'],
+    },
+  },
+  // Control, Playbooks & Operations
+  {
+    name: 'crm_get_business_settings',
+    description: 'Retrieve commercial profile, banking details, terms blocks, and numbering counters',
+    requiredScope: 'clients:read',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
+    name: 'crm_get_stage_playbook',
+    description: 'Retrieve stage guidance, exit criteria, exit checklist, and next action hints',
+    requiredScope: 'engagements:read',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        stage_id: { type: 'string' },
+        engagement_id: { type: 'string' },
+      },
+    },
+  },
+  {
+    name: 'crm_get_followups_due',
+    description: 'Check which clients are eligible for follow-up based on cadence rules or need escalation',
+    requiredScope: 'clients:read',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        stage_id: { type: 'string' },
+        limit: { type: 'number' },
+      },
+    },
+  },
+  {
+    name: 'crm_request_human',
+    description: 'Escalate to human owner when agent rules or gates cannot be satisfied autonomously',
+    requiredScope: 'activities:write',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        client_id: { type: 'string' },
+        engagement_id: { type: 'string' },
+        reason: { type: 'string', description: 'Detailed reason for human escalation' },
+        urgency: { type: 'string', enum: ['high', 'urgent'] },
+      },
+      required: ['client_id', 'reason'],
+    },
+  },
+  {
+    name: 'crm_ping',
+    description: 'Ping CRM service health; returns server time and pause status',
+    requiredScope: 'clients:read',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
+    name: 'crm_capabilities',
+    description: 'List all operational capabilities, tool registry, gate rules, and settings for AI agents',
+    requiredScope: 'clients:read',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+    },
+  },
 ];

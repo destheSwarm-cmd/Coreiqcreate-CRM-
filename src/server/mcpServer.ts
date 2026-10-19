@@ -3,20 +3,32 @@ import { db, generateToken } from './db';
 import { hasScope } from './scopes';
 import { computeLinePrice, computeQuoteTotals } from './pricingEngine';
 import { governor } from './governor';
-import { ApiKey, Client, Engagement, Deliverable, Quote, QuoteLine, RequestItem, Task, Activity, Feedback } from '../types/crm';
+import {
+  ApiKey,
+  Client,
+  Engagement,
+  Deliverable,
+  Quote,
+  QuoteLine,
+  RequestItem,
+  Task,
+  Activity,
+  Feedback,
+  Invoice,
+  InvoiceItem,
+  Payment,
+  Retainer,
+  Milestone,
+} from '../types/crm';
+import { MCP_TOOLS, McpToolDefinition } from '../shared/mcpToolList';
+import { generateInvoicePdf, generateQuotePdf } from './pdfGenerator';
+import { sendPushNotification } from './pushNotifier';
 
-export interface McpToolDefinition {
-  name: string;
-  description: string;
-  requiredScope: string;
-  inputSchema: {
-    type: 'object';
-    properties: Record<string, any>;
-    required?: string[];
-  };
-}
+export { MCP_TOOLS };
+export type { McpToolDefinition };
 
-export const MCP_TOOLS: McpToolDefinition[] = [
+// Baseline MCP tools imported from shared/mcpToolList
+const UNUSED_LEGACY_TOOLS: any[] = [
   {
     name: 'crm_search_clients',
     description: 'Search clients by query string (name, industry, tags, code) or stage',
@@ -545,7 +557,14 @@ export function authenticateKey(authHeader?: string): { success: boolean; key?: 
   const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
 
   const data = db.get();
-  const apiKey = data.api_keys.find((k) => k.key_hash === tokenHash);
+  const apiKey = data.api_keys.find((k) => {
+    if (!k.key_hash || k.key_hash.length !== tokenHash.length) return false;
+    try {
+      return crypto.timingSafeEqual(Buffer.from(k.key_hash), Buffer.from(tokenHash));
+    } catch {
+      return false;
+    }
+  });
 
   if (!apiKey) {
     return { success: false, error: 'Invalid API key' };
@@ -590,6 +609,7 @@ export async function executeMcpTool(
   }
 
   const data = db.get();
+  const businessSettings = db.getBusinessSettings();
   const actorName = apiKey.actor_name;
   const actorType: 'human' | 'agent' | 'system' | 'ai' = apiKey.actor_type === 'service' ? 'system' : apiKey.actor_type;
 
@@ -1114,6 +1134,637 @@ export async function executeMcpTool(
       }
       db.save();
       return { success: true, result: { message: `Permanently destroyed ${args.entity_type} ${args.entity_id}` } };
+    }
+
+    // Invoicing & Commercial Documents
+    case 'crm_create_invoice': {
+      const client = data.clients.find((c) => c.id === args.client_id || c.client_code === args.client_id);
+      if (!client) {
+        return { success: false, error: { code: 'NOT_FOUND', message: `Client '${args.client_id}' not found.` } };
+      }
+
+      const itemsInput = args.items || [];
+      if (!Array.isArray(itemsInput) || itemsInput.length === 0) {
+        return { success: false, error: { code: 'BAD_REQUEST', message: 'Invoice requires at least one line item in items array.' } };
+      }
+
+      const invoiceId = `inv_${Date.now()}`;
+      let subtotal = 0;
+      const items: InvoiceItem[] = itemsInput.map((it: any, i: number) => {
+        const qty = Number(it.qty) || 1;
+        const unitPrice = Number(it.unit_price) || 0;
+        const discountPct = Number(it.discount_pct) || 0;
+        const lineTotal = Math.round(qty * unitPrice * (1 - discountPct / 100) * 100) / 100;
+        subtotal += lineTotal;
+        return {
+          id: `ii_${Date.now()}_${i}`,
+          invoice_id: invoiceId,
+          product_id: it.product_id || null,
+          description: it.description,
+          sub_description: it.sub_description || null,
+          qty,
+          unit_price: unitPrice,
+          discount_pct: discountPct,
+          amount: lineTotal,
+          sort_order: i,
+        };
+      });
+
+      const vatRate = businessSettings.vat_enabled ? (businessSettings.vat_rate || 0.15) : 0;
+      const vatAmount = Math.round(subtotal * vatRate * 100) / 100;
+      const total = subtotal + vatAmount;
+
+      const invoiceNumber = args.custom_invoice_number || db.nextInvoiceCode();
+      const issueDate = new Date().toISOString().split('T')[0];
+      const dueDays = args.due_days || businessSettings.payment_due_days || 7;
+      const dueDate = new Date(Date.now() + dueDays * 86400000).toISOString().split('T')[0];
+
+      const primaryContact = data.contacts.find((c) => c.client_id === client.id && c.is_primary) || data.contacts.find((c) => c.client_id === client.id);
+
+      const invoice: Invoice = {
+        id: invoiceId,
+        invoice_number: invoiceNumber,
+        client_id: client.id,
+        engagement_id: args.engagement_id || null,
+        quote_id: args.quote_id || null,
+        status: args.is_historical ? 'paid' : 'draft',
+        issue_date: issueDate,
+        due_date: dueDate,
+        bill_to_snapshot: {
+          name: client.name,
+          attention: primaryContact?.full_name,
+          email: primaryContact?.email,
+          address: client.country,
+          registration_number: client.custom?.registration_number,
+          vat_number: client.custom?.vat_number,
+        },
+        from_business_snapshot: {
+          trading_name: businessSettings.trading_name,
+          tagline: businessSettings.tagline,
+          email: businessSettings.email,
+          website: businessSettings.website,
+          address: businessSettings.address,
+          registration_number: businessSettings.registration_number,
+          vat_number: businessSettings.vat_number,
+        },
+        terms_snapshot: businessSettings.terms_blocks,
+        selected_payment_methods: businessSettings.payment_methods.filter((m: any) => m.enabled !== false),
+        items,
+        subtotal,
+        vat_amount: vatAmount,
+        total,
+        amount_paid: args.is_historical ? total : 0,
+        amount_due: args.is_historical ? 0 : total,
+        currency: businessSettings.currency || 'ZAR',
+        notes: args.notes || null,
+        is_historical: Boolean(args.is_historical),
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+
+      data.invoices = data.invoices || [];
+      data.invoices.push(invoice);
+      data.invoice_items = data.invoice_items || [];
+      data.invoice_items.push(...items);
+
+      data.activities.push({
+        id: `act_${Date.now()}`,
+        client_id: client.id,
+        engagement_id: args.engagement_id || null,
+        type: 'note',
+        summary: `Invoice ${invoiceNumber} created (${invoice.currency} ${total})`,
+        body: `Generated commercial invoice with ${items.length} line items. Due: ${dueDate}.`,
+        actor_type: actorType,
+        actor_name: actorName,
+        metadata: { invoice_id: invoiceId, invoice_number: invoiceNumber, total },
+        occurred_at: new Date().toISOString(),
+      });
+
+      db.save();
+      return { success: true, result: { invoice } };
+    }
+
+    case 'crm_get_invoice': {
+      const inv = (data.invoices || []).find(
+        (i) => i.id === args.invoice_id || i.invoice_number === args.invoice_id
+      );
+      if (!inv) {
+        return { success: false, error: { code: 'NOT_FOUND', message: `Invoice '${args.invoice_id}' not found.` } };
+      }
+      const items = (data.invoice_items || []).filter((it) => it.invoice_id === inv.id);
+      const payments = (data.payments || []).filter((p) => p.invoice_id === inv.id);
+      return { success: true, result: { ...inv, items, payments } };
+    }
+
+    case 'crm_list_invoices': {
+      let list = data.invoices || [];
+      if (args.client_id) {
+        list = list.filter((i) => i.client_id === args.client_id);
+      }
+      if (args.status) {
+        list = list.filter((i) => i.status === args.status);
+      }
+      return { success: true, result: { invoices: list.slice(0, args.limit || 50), total: list.length } };
+    }
+
+    case 'crm_update_invoice': {
+      const inv = (data.invoices || []).find((i) => i.id === args.invoice_id);
+      if (!inv) {
+        return { success: false, error: { code: 'NOT_FOUND', message: `Invoice '${args.invoice_id}' not found.` } };
+      }
+      if (args.status) inv.status = args.status;
+      if (args.due_date) inv.due_date = args.due_date;
+      if (args.notes !== undefined) inv.notes = args.notes;
+      inv.updated_at = new Date().toISOString();
+      db.save();
+      return { success: true, result: { invoice: inv } };
+    }
+
+    case 'crm_record_payment': {
+      const inv = (data.invoices || []).find((i) => i.id === args.invoice_id || i.invoice_number === args.invoice_id);
+      if (!inv) {
+        return { success: false, error: { code: 'NOT_FOUND', message: `Invoice '${args.invoice_id}' not found.` } };
+      }
+
+      const amt = Number(args.amount);
+      if (!amt || amt <= 0) {
+        return { success: false, error: { code: 'BAD_REQUEST', message: 'Payment amount must be greater than 0.' } };
+      }
+
+      const paymentId = `pay_${Date.now()}`;
+      const payment: Payment = {
+        id: paymentId,
+        invoice_id: inv.id,
+        client_id: inv.client_id,
+        engagement_id: inv.engagement_id || null,
+        amount: amt,
+        currency: inv.currency || 'ZAR',
+        payment_date: new Date().toISOString().split('T')[0],
+        payment_method: args.payment_method,
+        reference: args.reference || null,
+        notes: args.notes || null,
+        recorded_by_actor: actorName,
+        created_at: new Date().toISOString(),
+      };
+
+      data.payments = data.payments || [];
+      data.payments.push(payment);
+
+      inv.amount_paid = (inv.amount_paid || 0) + amt;
+      inv.amount_due = Math.max(0, inv.total - inv.amount_paid);
+      if (inv.amount_due <= 0) {
+        inv.status = 'paid';
+      } else {
+        inv.status = 'partially_paid';
+      }
+      inv.updated_at = new Date().toISOString();
+
+      data.activities.push({
+        id: `act_${Date.now()}`,
+        client_id: inv.client_id,
+        engagement_id: inv.engagement_id || null,
+        type: 'note',
+        summary: `Payment received: R ${amt} (${inv.invoice_number})`,
+        body: `Payment recorded via ${args.payment_method}. Remaining due: R ${inv.amount_due}.`,
+        actor_type: actorType,
+        actor_name: actorName,
+        metadata: { payment_id: paymentId, invoice_id: inv.id, amount: amt },
+        occurred_at: new Date().toISOString(),
+      });
+
+      // Trigger Web Push Notification
+      sendPushNotification('money_in', {
+        title: `Money In: R ${amt}`,
+        body: `Payment confirmed for ${inv.invoice_number} via ${args.payment_method}. Balance: R ${inv.amount_due}`,
+        data: { invoice_id: inv.id, amount: amt },
+      }).catch(console.error);
+
+      db.save();
+      return { success: true, result: { payment, invoice: inv } };
+    }
+
+    case 'crm_generate_invoice_pdf': {
+      const inv = (data.invoices || []).find((i) => i.id === args.invoice_id || i.invoice_number === args.invoice_id);
+      if (!inv) {
+        return { success: false, error: { code: 'NOT_FOUND', message: `Invoice '${args.invoice_id}' not found.` } };
+      }
+      const items = (data.invoice_items || []).filter((it) => it.invoice_id === inv.id);
+      const invWithItems = { ...inv, items };
+      const pdfBytes = await generateInvoicePdf(invWithItems, businessSettings);
+      const pdfBase64 = Buffer.from(pdfBytes).toString('base64');
+      const filename = `Invoice-${inv.invoice_number}.pdf`;
+      return {
+        success: true,
+        result: {
+          invoice_number: inv.invoice_number,
+          filename,
+          pdf_base64: pdfBase64,
+          mime_type: 'application/pdf',
+          size_bytes: pdfBytes.length,
+        },
+      };
+    }
+
+    case 'crm_generate_quote_pdf': {
+      const quote = data.quotes.find((q) => q.id === args.quote_id || q.quote_code === args.quote_id);
+      if (!quote) {
+        return { success: false, error: { code: 'NOT_FOUND', message: `Quote '${args.quote_id}' not found.` } };
+      }
+      const client = data.clients.find((c) => c.id === quote.client_id) || { name: 'Client' };
+      const lines = data.quote_lines.filter((l) => l.quote_id === quote.id);
+      const pdfBytes = await generateQuotePdf(quote, client, lines, businessSettings);
+      const pdfBase64 = Buffer.from(pdfBytes).toString('base64');
+      const filename = `Quote-${quote.quote_code}.pdf`;
+      return {
+        success: true,
+        result: {
+          quote_code: quote.quote_code,
+          filename,
+          pdf_base64: pdfBase64,
+          mime_type: 'application/pdf',
+          size_bytes: pdfBytes.length,
+        },
+      };
+    }
+
+    case 'crm_mark_document_sent': {
+      const docType = args.document_type;
+      const docId = args.document_id;
+      if (docType === 'invoice') {
+        const inv = (data.invoices || []).find((i) => i.id === docId || i.invoice_number === docId);
+        if (!inv) return { success: false, error: { code: 'NOT_FOUND', message: `Invoice '${docId}' not found.` } };
+        inv.status = 'sent';
+        inv.sent_at = new Date().toISOString();
+        inv.sent_channel = args.channel || 'email';
+        inv.sent_recipient = args.recipient || null;
+        inv.updated_at = new Date().toISOString();
+        data.activities.push({
+          id: `act_${Date.now()}`,
+          client_id: inv.client_id,
+          engagement_id: inv.engagement_id || null,
+          type: 'email_out',
+          summary: `Invoice ${inv.invoice_number} sent to ${args.recipient || 'client'}`,
+          body: `Dispatched via ${args.channel || 'email'}. Total: R ${inv.total}.`,
+          actor_type: actorType,
+          actor_name: actorName,
+          metadata: {},
+          occurred_at: new Date().toISOString(),
+        });
+      } else if (docType === 'quote') {
+        const q = data.quotes.find((quote) => quote.id === docId || quote.quote_code === docId);
+        if (!q) return { success: false, error: { code: 'NOT_FOUND', message: `Quote '${docId}' not found.` } };
+        q.status = 'sent';
+        q.sent_at = new Date().toISOString();
+        data.activities.push({
+          id: `act_${Date.now()}`,
+          client_id: q.client_id,
+          engagement_id: q.engagement_id || null,
+          type: 'email_out',
+          summary: `Quote ${q.quote_code} marked sent`,
+          body: `Dispatched commercial proposal.`,
+          actor_type: actorType,
+          actor_name: actorName,
+          metadata: {},
+          occurred_at: new Date().toISOString(),
+        });
+      }
+      db.save();
+      return { success: true, result: { message: `${docType} marked as sent.` } };
+    }
+
+    case 'crm_accept_quote': {
+      const quote = data.quotes.find((q) => q.id === args.quote_id || q.quote_code === args.quote_id);
+      if (!quote) {
+        return { success: false, error: { code: 'NOT_FOUND', message: `Quote '${args.quote_id}' not found.` } };
+      }
+      quote.status = 'accepted';
+      quote.accepted_at = new Date().toISOString();
+      quote.accepted_by_name = args.accepted_by_name || 'Authorized Client Rep';
+      quote.accepted_via = 'other';
+      quote.acceptance_note = args.acceptance_note || 'Commercial confirmation received';
+
+      // Move engagement to Won: Building
+      if (quote.engagement_id) {
+        const eng = data.engagements.find((e) => e.id === quote.engagement_id);
+        if (eng) {
+          const wonStage = data.pipeline_stages.find((s) => s.key === 'won_building' || s.name.includes('Won'));
+          if (wonStage) {
+            eng.stage_id = wonStage.id;
+            eng.stage_entered_at = new Date().toISOString();
+            eng.outcome = 'won';
+          }
+        }
+      }
+
+      // Generate build brief
+      const lines = data.quote_lines.filter((l) => l.quote_id === quote.id);
+      const briefId = `bb_${Date.now()}`;
+      data.build_briefs.push({
+        id: briefId,
+        quote_id: quote.id,
+        engagement_id: quote.engagement_id,
+        brief_md: `# Build Brief: ${quote.quote_code}\nTotal: R ${quote.total}\nAccepted by: ${quote.accepted_by_name}`,
+        scope: { linesCount: lines.length, total: quote.total, lines },
+        created_by_actor: actorName,
+        created_at: new Date().toISOString(),
+      });
+
+      sendPushNotification('build_needed', {
+        title: `Build Needed: ${quote.quote_code}`,
+        body: `Quote accepted by ${quote.accepted_by_name}. Project moved to Won: Building.`,
+        data: { quote_id: quote.id, brief_id: briefId },
+      }).catch(console.error);
+
+      db.save();
+      return { success: true, result: { quote, brief_id: briefId, message: 'Quote accepted and build brief registered.' } };
+    }
+
+    case 'crm_approve_quote': {
+      const quote = data.quotes.find((q) => q.id === args.quote_id || q.quote_code === args.quote_id);
+      if (!quote) {
+        return { success: false, error: { code: 'NOT_FOUND', message: `Quote '${args.quote_id}' not found.` } };
+      }
+      quote.status = 'draft';
+      data.approvals.push({
+        id: `app_${Date.now()}`,
+        entity_type: 'quote',
+        entity_id: quote.id,
+        requested_by_actor: actorName,
+        reason: args.reason || 'Approved by commercial authority',
+        status: 'approved',
+        decided_by: actorName,
+        decided_at: new Date().toISOString(),
+        created_at: new Date().toISOString(),
+      });
+      db.save();
+      return { success: true, result: { quote, message: 'Quote pricing approved successfully.' } };
+    }
+
+    // Retainers
+    case 'crm_create_retainer': {
+      const client = data.clients.find((c) => c.id === args.client_id || c.client_code === args.client_id);
+      if (!client) {
+        return { success: false, error: { code: 'NOT_FOUND', message: `Client '${args.client_id}' not found.` } };
+      }
+      const retainer: Retainer = {
+        id: `ret_${Date.now()}`,
+        client_id: client.id,
+        engagement_id: args.engagement_id || null,
+        description: args.description,
+        amount: Number(args.amount),
+        currency: 'ZAR',
+        cycle: args.cycle,
+        next_invoice_date: args.start_date || new Date().toISOString().split('T')[0],
+        status: 'active',
+        start_date: args.start_date || new Date().toISOString().split('T')[0],
+        notes: args.notes || null,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      data.retainers = data.retainers || [];
+      data.retainers.push(retainer);
+      db.save();
+      return { success: true, result: { retainer } };
+    }
+
+    case 'crm_list_retainers': {
+      let list = data.retainers || [];
+      if (args.client_id) list = list.filter((r) => r.client_id === args.client_id);
+      if (args.status) list = list.filter((r) => r.status === args.status);
+      return { success: true, result: { retainers: list, count: list.length } };
+    }
+
+    case 'crm_generate_retainer_invoice': {
+      const retainer = (data.retainers || []).find((r) => r.id === args.retainer_id);
+      if (!retainer) {
+        return { success: false, error: { code: 'NOT_FOUND', message: `Retainer '${args.retainer_id}' not found.` } };
+      }
+      const client = data.clients.find((c) => c.id === retainer.client_id);
+      const invoiceNumber = db.nextInvoiceCode();
+      const invoiceId = `inv_${Date.now()}`;
+      const total = retainer.amount;
+
+      const invoice: Invoice = {
+        id: invoiceId,
+        invoice_number: invoiceNumber,
+        client_id: retainer.client_id,
+        engagement_id: retainer.engagement_id || null,
+        retainer_id: retainer.id,
+        status: 'draft',
+        issue_date: new Date().toISOString().split('T')[0],
+        due_date: new Date(Date.now() + 7 * 86400000).toISOString().split('T')[0],
+        bill_to_snapshot: { name: client?.name || 'Client' },
+        from_business_snapshot: {
+          trading_name: businessSettings.trading_name,
+          tagline: businessSettings.tagline,
+          email: businessSettings.email,
+          website: businessSettings.website,
+        },
+        terms_snapshot: businessSettings.terms_blocks,
+        selected_payment_methods: businessSettings.payment_methods.filter((m: any) => m.enabled !== false),
+        subtotal: total,
+        vat_amount: 0,
+        total,
+        amount_paid: 0,
+        amount_due: total,
+        currency: retainer.currency,
+        notes: `Retainer recurring cycle: ${retainer.cycle}`,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+
+      data.invoices = data.invoices || [];
+      data.invoices.push(invoice);
+      retainer.last_invoiced_date = new Date().toISOString().split('T')[0];
+      retainer.updated_at = new Date().toISOString();
+
+      sendPushNotification('retainer_due', {
+        title: `Retainer Invoiced: ${client?.name}`,
+        body: `Generated invoice ${invoiceNumber} for R ${total} (${retainer.cycle})`,
+      }).catch(console.error);
+
+      db.save();
+      return { success: true, result: { invoice, retainer } };
+    }
+
+    // Milestones & Delivery
+    case 'crm_list_milestones': {
+      const list = (data.milestones || []).filter((m) => m.engagement_id === args.engagement_id);
+      return { success: true, result: { milestones: list } };
+    }
+
+    case 'crm_create_milestone': {
+      const milestone: Milestone = {
+        id: `ms_${Date.now()}`,
+        engagement_id: args.engagement_id,
+        title: args.title,
+        description: args.description || null,
+        due_date: args.due_date || null,
+        status: 'todo',
+        sort_order: args.sort_order || 0,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      data.milestones = data.milestones || [];
+      data.milestones.push(milestone);
+      db.save();
+      return { success: true, result: { milestone } };
+    }
+
+    case 'crm_update_milestone': {
+      const ms = (data.milestones || []).find((m) => m.id === args.milestone_id);
+      if (!ms) {
+        return { success: false, error: { code: 'NOT_FOUND', message: `Milestone '${args.milestone_id}' not found.` } };
+      }
+      ms.status = args.status;
+      if (args.status === 'done') {
+        ms.completed_at = new Date().toISOString();
+      }
+      ms.updated_at = new Date().toISOString();
+      db.save();
+      return { success: true, result: { milestone: ms } };
+    }
+
+    // Operations, Settings & Gates
+    case 'crm_get_business_settings': {
+      return { success: true, result: db.getBusinessSettings() };
+    }
+
+    case 'crm_get_stage_playbook': {
+      let stage = data.pipeline_stages.find((s) => s.id === args.stage_id || s.key === args.stage_id);
+      if (!stage && args.engagement_id) {
+        const eng = data.engagements.find((e) => e.id === args.engagement_id);
+        if (eng) stage = data.pipeline_stages.find((s) => s.id === eng.stage_id);
+      }
+      if (!stage) {
+        return { success: false, error: { code: 'NOT_FOUND', message: 'Stage not found.' } };
+      }
+      return {
+        success: true,
+        result: {
+          stage_id: stage.id,
+          stage_key: stage.key,
+          stage_name: stage.name,
+          guidance: stage.guidance_md,
+          exit_checklist: stage.exit_checklist,
+          required_fields: stage.required_fields,
+          sla_days: stage.sla_days,
+          probability_pct: stage.probability_pct,
+        },
+      };
+    }
+
+    case 'crm_get_followups_due': {
+      const minHours = businessSettings.followup_min_hours || 24;
+      const maxAttempts = businessSettings.followup_max_per_stage || 3;
+      const now = Date.now();
+
+      const results = data.clients.map((client) => {
+        const eng = data.engagements.find((e) => e.client_id === client.id && !e.archived_at);
+        const stage = eng ? data.pipeline_stages.find((s) => s.id === eng.stage_id) : null;
+        const lastFollowup = client.last_followup_at ? new Date(client.last_followup_at).getTime() : 0;
+        const hoursSince = lastFollowup ? Math.round((now - lastFollowup) / 3600000) : 999;
+        const attempts = client.followup_count || 0;
+
+        const eligible = hoursSince >= minHours && attempts < maxAttempts;
+        const escalate = attempts >= maxAttempts;
+
+        return {
+          client_id: client.id,
+          client_code: client.client_code,
+          name: client.name,
+          stage: stage?.name || 'Unassigned',
+          hours_since_last_contact: hoursSince,
+          attempts_in_stage: attempts,
+          eligible_for_followup: eligible,
+          escalate,
+          suggested_action: escalate
+            ? 'Escalate to human owner via crm_request_human'
+            : eligible
+            ? 'Draft follow-up note via crm_draft_email'
+            : `Cadence guard: wait ${minHours - hoursSince}h`,
+        };
+      });
+
+      return { success: true, result: { followups_due: results } };
+    }
+
+    case 'crm_request_human': {
+      const client = data.clients.find((c) => c.id === args.client_id || c.client_code === args.client_id);
+      const task: Task = {
+        id: `tsk_${Date.now()}`,
+        client_id: client?.id || args.client_id,
+        engagement_id: args.engagement_id || null,
+        title: `HUMAN ESCALATION: ${client?.name || 'Client'}`,
+        description: args.reason,
+        due_at: new Date(Date.now() + 24 * 3600000).toISOString(),
+        priority: args.urgency === 'urgent' ? 'high' : 'high',
+        status: 'open',
+        assignee_actor: 'Desmond',
+        created_by_actor: actorName,
+        source: 'ai',
+        created_at: new Date().toISOString(),
+      };
+      data.tasks.push(task);
+
+      data.activities.push({
+        id: `act_${Date.now()}`,
+        client_id: client?.id || args.client_id,
+        engagement_id: args.engagement_id || null,
+        type: 'note',
+        summary: `Human intervention requested by ${actorName}`,
+        body: args.reason,
+        actor_type: actorType,
+        actor_name: actorName,
+        metadata: {},
+        occurred_at: new Date().toISOString(),
+      });
+
+      sendPushNotification('human_requested', {
+        title: `Operator Escalation: ${client?.name || 'Client'}`,
+        body: args.reason,
+        data: { client_id: client?.id, task_id: task.id },
+      }).catch(console.error);
+
+      db.save();
+      return { success: true, result: { task, message: 'Operator escalation registered and push alert dispatched.' } };
+    }
+
+    case 'crm_ping': {
+      return {
+        success: true,
+        result: {
+          status: 'ok',
+          server_time: new Date().toISOString(),
+          agents_paused: businessSettings.agents_paused,
+          version: '1.2.0-coreiq',
+        },
+      };
+    }
+
+    case 'crm_capabilities': {
+      return {
+        success: true,
+        result: {
+          total_tools: MCP_TOOLS.length,
+          tools: MCP_TOOLS.map((t) => ({ name: t.name, scope: t.requiredScope, description: t.description })),
+          gates: [
+            { name: 'quote_discount_approval', condition: 'discount_pct > agent_discount_cap', resolution_tool: 'crm_approve_quote' },
+            { name: 'unpriced_product', condition: 'needs_price === true', resolution_tool: 'crm_price_estimate' },
+            { name: 'stage_reason', condition: 'reason is mandatory', resolution_tool: 'crm_move_stage' },
+            { name: 'stage_checklist', condition: 'exit_checklist items pending', resolution_tool: 'crm_get_stage_playbook' },
+            { name: 'send_mode_draft', condition: 'send_mode === draft', resolution_tool: 'crm_generate_invoice_pdf / crm_generate_quote_pdf' },
+            { name: 'agents_paused', condition: 'operator toggled pause', resolution_tool: 'crm_ping' },
+            { name: 'cadence_guard', condition: 'contacted within min_hours or max_attempts', resolution_tool: 'crm_request_human' },
+          ],
+          settings: {
+            currency: businessSettings.currency,
+            vat_enabled: businessSettings.vat_enabled,
+            send_mode: businessSettings.send_mode,
+            agents_paused: businessSettings.agents_paused,
+          },
+        },
+      };
     }
 
     default:

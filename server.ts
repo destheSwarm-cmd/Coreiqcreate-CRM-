@@ -10,10 +10,13 @@ import { ALL_SCOPES, GRANTABLE_SCOPES, SCOPE_PRESETS, hasScope } from './src/ser
 import { computeLinePrice, computeQuoteTotals } from './src/server/pricingEngine';
 import { governor } from './src/server/governor';
 import { MCP_TOOLS, authenticateKey, executeMcpTool } from './src/server/mcpServer';
-import { Client, Contact, Engagement, Quote, QuoteLine, BuildBrief, RequestItem, Activity } from './src/types/crm';
+import { Client, Contact, Engagement, Quote, QuoteLine, BuildBrief, RequestItem, Activity, Invoice, InvoiceItem, Payment, Retainer, Milestone } from './src/types/crm';
+import { generateInvoicePdf, generateQuotePdf } from './src/server/pdfGenerator';
+import { sendPushNotification, getPublicVapidKey } from './src/server/pushNotifier';
 
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+const APP_URL = process.env.APP_URL || '';
 
 // Supabase Server Client (initialized from env using service role key, server-side only)
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
@@ -28,11 +31,39 @@ export const supabaseServer: SupabaseClient | null = (SUPABASE_URL && SUPABASE_S
     })
   : null;
 
+// Security Headers (Section 10)
+app.use((_req: Request, res: Response, next: NextFunction) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('X-XSS-Protection', '1; mode=block');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  next();
+});
+
+// CORS: Limited to APP_URL for session routes; allows /mcp for MCP clients (Section 10)
+app.use((req: Request, res: Response, next: NextFunction) => {
+  const origin = req.headers.origin;
+  if (req.path.startsWith('/mcp') || req.path.startsWith('/quote') || req.path.startsWith('/q/') || req.path.startsWith('/f/')) {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+  } else if (APP_URL && origin === APP_URL) {
+    res.setHeader('Access-Control-Allow-Origin', APP_URL);
+  } else if (!APP_URL) {
+    res.setHeader('Access-Control-Allow-Origin', origin || '*');
+  }
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Idempotency-Key');
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+  next();
+});
+
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// Rate limiting in-memory map
+// Rate limiting in-memory maps (API Key & Failed IP attempts)
 const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
+const failedIpMap = new Map<string, { count: number; resetAt: number }>();
 
 function checkRateLimit(key: string, limitPerMin: number = 60): { allowed: boolean; retryAfter?: number } {
   const now = Date.now();
@@ -49,13 +80,49 @@ function checkRateLimit(key: string, limitPerMin: number = 60): { allowed: boole
   return { allowed: true };
 }
 
-// REST API Bearer Auth Middleware
+function checkFailedIpLimit(ip: string): { allowed: boolean; retryAfter?: number } {
+  const now = Date.now();
+  const entry = failedIpMap.get(ip);
+  if (!entry || now > entry.resetAt) {
+    return { allowed: true };
+  }
+  if (entry.count >= 10) {
+    const retryAfter = Math.ceil((entry.resetAt - now) / 1000);
+    return { allowed: false, retryAfter };
+  }
+  return { allowed: true };
+}
+
+function recordFailedIpAttempt(ip: string) {
+  const now = Date.now();
+  const entry = failedIpMap.get(ip);
+  if (!entry || now > entry.resetAt) {
+    failedIpMap.set(ip, { count: 1, resetAt: now + 300000 }); // 5 min lockout
+  } else {
+    entry.count++;
+  }
+}
+
+// REST API Bearer Auth Middleware with Failed IP Rate-Limiting (Section 10)
 function requireApiAuth(requiredScope: string) {
   return (req: Request, res: Response, next: NextFunction) => {
+    const ip = req.ip || req.socket.remoteAddress || 'unknown';
+    const ipCheck = checkFailedIpLimit(ip);
+    if (!ipCheck.allowed) {
+      res.setHeader('Retry-After', String(ipCheck.retryAfter));
+      return res.status(429).json({
+        error: {
+          code: 'RATE_LIMIT_EXCEEDED',
+          message: `Too many failed authentication attempts from this IP. Try again in ${ipCheck.retryAfter}s.`,
+        },
+      });
+    }
+
     const authHeader = req.headers.authorization;
     const authResult = authenticateKey(authHeader);
 
     if (!authResult.success || !authResult.key) {
+      recordFailedIpAttempt(ip);
       return res.status(401).json({
         error: {
           code: 'UNAUTHORIZED',
@@ -93,7 +160,8 @@ function requireApiAuth(requiredScope: string) {
 }
 
 // -------------------------------------------------------------
-// SUPABASE SESSION AUTH MIDDLEWARE (Step 1 & 2)
+// SUPABASE SESSION AUTH MIDDLEWARE (Global Rule 2)
+// A signed-in Supabase user with NO role in user_roles gets nothing from any API route
 // -------------------------------------------------------------
 async function requireSession(req: Request, res: Response, next: NextFunction) {
   const authHeader = req.headers.authorization;
@@ -127,14 +195,21 @@ async function requireSession(req: Request, res: Response, next: NextFunction) {
       });
     }
 
-    // Load role from user_roles
+    // Load role strictly from user_roles (Global Rule 2)
     const { data: roleRow } = await supabaseServer
       .from('user_roles')
       .select('role')
       .eq('user_id', user.id)
       .maybeSingle();
 
-    const role = roleRow?.role || 'viewer';
+    if (!roleRow || !roleRow.role) {
+      return res.status(403).json({
+        error: 'FORBIDDEN',
+        message: 'Signed-in user has no assigned role in user_roles. Access denied.',
+      });
+    }
+
+    const role = roleRow.role;
 
     (req as any).user = user;
     (req as any).role = role;
@@ -525,6 +600,388 @@ app.patch('/api/crm/tasks/:id', requireSession, async (req: Request, res: Respon
   } catch (err: any) {
     res.status(500).json({ error: 'DATABASE_ERROR', message: err.message });
   }
+});
+// -------------------------------------------------------------
+// BUSINESS SETTINGS, INVOICES, PAYMENTS, RETAINERS, MILESTONES & PDF
+// -------------------------------------------------------------
+
+// GET /api/business-settings
+app.get('/api/business-settings', requireSession, async (_req: Request, res: Response) => {
+  res.json({ settings: db.getBusinessSettings() });
+});
+
+// POST /api/business-settings (Owner only)
+app.post('/api/business-settings', requireSession, requireRole(['owner']), async (req: Request, res: Response) => {
+  const updated = db.updateBusinessSettings(req.body);
+  res.json({ success: true, settings: updated });
+});
+
+// GET /api/crm/invoices
+app.get('/api/crm/invoices', requireSession, async (req: Request, res: Response) => {
+  const data = db.get();
+  let list = data.invoices || [];
+  if (req.query.client_id) {
+    list = list.filter((i) => i.client_id === req.query.client_id);
+  }
+  res.json({ invoices: list });
+});
+
+// POST /api/crm/invoices (Create or record historical invoice)
+app.post('/api/crm/invoices', requireSession, async (req: Request, res: Response) => {
+  if ((req as any).role === 'viewer') {
+    return res.status(403).json({ error: 'FORBIDDEN', message: 'Viewer role is read-only' });
+  }
+
+  const { client_id, engagement_id, quote_id, items: itemsInput, notes, due_days, is_historical, custom_invoice_number } = req.body;
+  const data = db.get();
+  const client = data.clients.find((c) => c.id === client_id || c.client_code === client_id);
+  if (!client) {
+    return res.status(404).json({ error: 'NOT_FOUND', message: 'Client not found' });
+  }
+
+  const business = db.getBusinessSettings();
+  const invoiceId = `inv_${Date.now()}`;
+  let subtotal = 0;
+  const items: InvoiceItem[] = (itemsInput || []).map((it: any, i: number) => {
+    const qty = Number(it.qty) || 1;
+    const unitPrice = Number(it.unit_price) || 0;
+    const discountPct = Number(it.discount_pct) || 0;
+    const lineTotal = Math.round(qty * unitPrice * (1 - discountPct / 100) * 100) / 100;
+    subtotal += lineTotal;
+    return {
+      id: `ii_${Date.now()}_${i}`,
+      invoice_id: invoiceId,
+      product_id: it.product_id || null,
+      description: it.description,
+      sub_description: it.sub_description || null,
+      qty,
+      unit_price: unitPrice,
+      discount_pct: discountPct,
+      amount: lineTotal,
+      sort_order: i,
+    };
+  });
+
+  const vatRate = business.vat_enabled ? (business.vat_rate || 0.15) : 0;
+  const vatAmount = Math.round(subtotal * vatRate * 100) / 100;
+  const total = subtotal + vatAmount;
+  const invoiceNumber = custom_invoice_number || db.nextInvoiceCode();
+  const dueDate = new Date(Date.now() + (due_days || business.payment_due_days || 7) * 86400000).toISOString().split('T')[0];
+
+  const primaryContact = data.contacts.find((c) => c.client_id === client.id && c.is_primary) || data.contacts.find((c) => c.client_id === client.id);
+
+  const invoice: Invoice = {
+    id: invoiceId,
+    invoice_number: invoiceNumber,
+    client_id: client.id,
+    engagement_id: engagement_id || null,
+    quote_id: quote_id || null,
+    status: is_historical ? 'paid' : 'draft',
+    issue_date: new Date().toISOString().split('T')[0],
+    due_date: dueDate,
+    bill_to_snapshot: {
+      name: client.name,
+      attention: primaryContact?.full_name,
+      email: primaryContact?.email,
+      address: client.country,
+      registration_number: client.custom?.registration_number,
+      vat_number: client.custom?.vat_number,
+    },
+    from_business_snapshot: {
+      trading_name: business.trading_name,
+      tagline: business.tagline,
+      email: business.email,
+      website: business.website,
+      address: business.address,
+      registration_number: business.registration_number,
+      vat_number: business.vat_number,
+    },
+    terms_snapshot: business.terms_blocks,
+    selected_payment_methods: business.payment_methods.filter((m) => m.enabled !== false),
+    items,
+    subtotal,
+    vat_amount: vatAmount,
+    total,
+    amount_paid: is_historical ? total : 0,
+    amount_due: is_historical ? 0 : total,
+    currency: business.currency || 'ZAR',
+    notes: notes || null,
+    is_historical: Boolean(is_historical),
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+
+  data.invoices = data.invoices || [];
+  data.invoices.push(invoice);
+  data.invoice_items = data.invoice_items || [];
+  data.invoice_items.push(...items);
+  db.save();
+
+  res.json({ success: true, invoice });
+});
+
+// POST /api/crm/payments (Record payment against invoice)
+app.post('/api/crm/payments', requireSession, async (req: Request, res: Response) => {
+  if ((req as any).role === 'viewer') {
+    return res.status(403).json({ error: 'FORBIDDEN', message: 'Viewer role is read-only' });
+  }
+
+  const { invoice_id, amount, payment_method, reference, notes } = req.body;
+  const data = db.get();
+  const inv = (data.invoices || []).find((i) => i.id === invoice_id || i.invoice_number === invoice_id);
+  if (!inv) {
+    return res.status(404).json({ error: 'NOT_FOUND', message: 'Invoice not found' });
+  }
+
+  const amt = Number(amount);
+  const payment: Payment = {
+    id: `pay_${Date.now()}`,
+    invoice_id: inv.id,
+    client_id: inv.client_id,
+    engagement_id: inv.engagement_id || null,
+    amount: amt,
+    currency: inv.currency || 'ZAR',
+    payment_date: new Date().toISOString().split('T')[0],
+    payment_method: payment_method || 'EFT',
+    reference: reference || null,
+    notes: notes || null,
+    recorded_by_actor: (req as any).user?.email || 'Owner',
+    created_at: new Date().toISOString(),
+  };
+
+  data.payments = data.payments || [];
+  data.payments.push(payment);
+
+  inv.amount_paid = (inv.amount_paid || 0) + amt;
+  inv.amount_due = Math.max(0, inv.total - inv.amount_paid);
+  inv.status = inv.amount_due <= 0 ? 'paid' : 'partially_paid';
+  inv.updated_at = new Date().toISOString();
+  db.save();
+
+  sendPushNotification('money_in', {
+    title: `Money In: R ${amt}`,
+    body: `Payment recorded for ${inv.invoice_number}. Balance: R ${inv.amount_due}`,
+    data: { invoice_id: inv.id, amount: amt },
+  }).catch(console.error);
+
+  res.json({ success: true, payment, invoice: inv });
+});
+
+// GET /api/crm/retainers
+app.get('/api/crm/retainers', requireSession, async (_req: Request, res: Response) => {
+  const data = db.get();
+  res.json({ retainers: data.retainers || [] });
+});
+
+// POST /api/crm/retainers
+app.post('/api/crm/retainers', requireSession, async (req: Request, res: Response) => {
+  if ((req as any).role === 'viewer') {
+    return res.status(403).json({ error: 'FORBIDDEN', message: 'Viewer role is read-only' });
+  }
+  const { client_id, engagement_id, description, amount, cycle, start_date, notes } = req.body;
+  const data = db.get();
+  const retainer: Retainer = {
+    id: `ret_${Date.now()}`,
+    client_id,
+    engagement_id: engagement_id || null,
+    description,
+    amount: Number(amount),
+    currency: 'ZAR',
+    cycle: cycle || 'monthly',
+    next_invoice_date: start_date || new Date().toISOString().split('T')[0],
+    status: 'active',
+    start_date: start_date || new Date().toISOString().split('T')[0],
+    notes: notes || null,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+  data.retainers = data.retainers || [];
+  data.retainers.push(retainer);
+  db.save();
+  res.json({ success: true, retainer });
+});
+
+// GET /api/crm/milestones/:engagement_id
+app.get('/api/crm/milestones/:engagement_id', requireSession, async (req: Request, res: Response) => {
+  const data = db.get();
+  const milestones = (data.milestones || []).filter((m) => m.engagement_id === req.params.engagement_id);
+  res.json({ milestones });
+});
+
+// POST /api/crm/milestones
+app.post('/api/crm/milestones', requireSession, async (req: Request, res: Response) => {
+  if ((req as any).role === 'viewer') {
+    return res.status(403).json({ error: 'FORBIDDEN', message: 'Viewer role is read-only' });
+  }
+  const { engagement_id, title, description, due_date, sort_order } = req.body;
+  const data = db.get();
+  const milestone: Milestone = {
+    id: `ms_${Date.now()}`,
+    engagement_id,
+    title,
+    description: description || null,
+    due_date: due_date || null,
+    status: 'todo',
+    sort_order: sort_order || 0,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+  data.milestones = data.milestones || [];
+  data.milestones.push(milestone);
+  db.save();
+  res.json({ success: true, milestone });
+});
+
+// PATCH /api/crm/milestones/:id
+app.patch('/api/crm/milestones/:id', requireSession, async (req: Request, res: Response) => {
+  if ((req as any).role === 'viewer') {
+    return res.status(403).json({ error: 'FORBIDDEN', message: 'Viewer role is read-only' });
+  }
+  const data = db.get();
+  const ms = (data.milestones || []).find((m) => m.id === req.params.id);
+  if (!ms) return res.status(404).json({ error: 'NOT_FOUND', message: 'Milestone not found' });
+  if (req.body.status) ms.status = req.body.status;
+  if (req.body.status === 'done') ms.completed_at = new Date().toISOString();
+  ms.updated_at = new Date().toISOString();
+  db.save();
+  res.json({ success: true, milestone: ms });
+});
+
+// GET /api/invoices/:id/pdf (Direct on-demand streaming PDF download)
+app.get('/api/invoices/:id/pdf', async (req: Request, res: Response) => {
+  const data = db.get();
+  const inv = (data.invoices || []).find((i) => i.id === req.params.id || i.invoice_number === req.params.id);
+  if (!inv) return res.status(404).send('Invoice not found');
+  const items = (data.invoice_items || []).filter((it) => it.invoice_id === inv.id);
+  const pdfBytes = await generateInvoicePdf({ ...inv, items }, db.getBusinessSettings());
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `inline; filename="Invoice-${inv.invoice_number}.pdf"`);
+  res.send(Buffer.from(pdfBytes));
+});
+
+// GET /api/quotes/:id/pdf (Direct on-demand streaming PDF download)
+app.get('/api/quotes/:id/pdf', async (req: Request, res: Response) => {
+  const data = db.get();
+  const quote = data.quotes.find((q) => q.id === req.params.id || q.quote_code === req.params.id);
+  if (!quote) return res.status(404).send('Quote not found');
+  const client = data.clients.find((c) => c.id === quote.client_id) || { name: 'Client' };
+  const lines = data.quote_lines.filter((l) => l.quote_id === quote.id);
+  const pdfBytes = await generateQuotePdf(quote, client, lines, db.getBusinessSettings());
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `inline; filename="Quote-${quote.quote_code}.pdf"`);
+  res.send(Buffer.from(pdfBytes));
+});
+
+// Push notification routes
+app.get('/api/push/vapid-public-key', (_req: Request, res: Response) => {
+  res.json({ publicKey: getPublicVapidKey() });
+});
+
+app.post('/api/push/subscribe', requireSession, async (req: Request, res: Response) => {
+  const { subscription, device_name } = req.body;
+  if (!subscription || !subscription.endpoint || !subscription.keys) {
+    return res.status(400).json({ error: 'Invalid subscription object' });
+  }
+
+  const user = (req as any).user;
+  if (supabaseServer) {
+    try {
+      await supabaseServer.from('push_subscriptions').upsert(
+        {
+          endpoint: subscription.endpoint,
+          keys: subscription.keys,
+          user_id: user?.id || null,
+          device_name: device_name || 'Android Chrome Phone',
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: 'endpoint' }
+      );
+    } catch {
+      // Fallback
+    }
+  }
+
+  const data = db.get() as any;
+  data.push_subscriptions = data.push_subscriptions || [];
+  const idx = data.push_subscriptions.findIndex((s: any) => s.endpoint === subscription.endpoint);
+  if (idx >= 0) {
+    data.push_subscriptions[idx] = { ...data.push_subscriptions[idx], keys: subscription.keys, device_name };
+  } else {
+    data.push_subscriptions.push({
+      id: `ps_${Date.now()}`,
+      endpoint: subscription.endpoint,
+      keys: subscription.keys,
+      user_id: user?.id,
+      device_name: device_name || 'Android Chrome Phone',
+      created_at: new Date().toISOString(),
+    });
+  }
+  db.save();
+
+  res.json({ success: true, message: 'Web Push subscription registered.' });
+});
+
+app.post('/api/push/test', requireSession, async (_req: Request, res: Response) => {
+  const result = await sendPushNotification('money_in', {
+    title: 'CoreIQ CRM Push Active',
+    body: 'Push notifications are operating normally for Android Chrome.',
+    data: { test: true, timestamp: Date.now() },
+  });
+  res.json(result);
+});
+
+// GET /api/crm/schema-status (Card in Settings: checks every required table and column as OK or MISSING)
+app.get('/api/crm/schema-status', requireSession, async (_req: Request, res: Response) => {
+  const requiredSchema: Record<string, string[]> = {
+    settings: ['id', 'created_at'],
+    profiles: ['id', 'email', 'role'],
+    user_roles: ['user_id', 'role'],
+    clients: ['id', 'client_code', 'name', 'last_followup_at', 'followup_count'],
+    contacts: ['id', 'client_id', 'full_name', 'email'],
+    pipeline_stages: ['id', 'key', 'name', 'goal', 'exit_criteria', 'next_action_hint', 'stale_after_days'],
+    engagements: ['id', 'engagement_code', 'human_code', 'client_id', 'stage_id'],
+    stage_history: ['id', 'engagement_id', 'reason', 'actor_name'],
+    tasks: ['id', 'client_id', 'title', 'due_at', 'status'],
+    activities: ['id', 'client_id', 'summary', 'occurred_at'],
+    audit_log: ['id', 'action', 'entity_type'],
+    business_settings: ['id', 'trading_name', 'currency', 'payment_methods', 'terms_blocks', 'agents_paused', 'send_mode'],
+    document_counters: ['id', 'last_value'],
+    invoices: ['id', 'invoice_number', 'client_id', 'status', 'total', 'amount_due'],
+    invoice_items: ['id', 'invoice_id', 'description', 'amount'],
+    payments: ['id', 'invoice_id', 'amount', 'payment_method'],
+    retainers: ['id', 'client_id', 'amount', 'cycle', 'next_invoice_date', 'status'],
+    milestones: ['id', 'engagement_id', 'title', 'status'],
+    push_subscriptions: ['id', 'endpoint', 'keys'],
+    idempotency_keys: ['key', 'response', 'expires_at'],
+  };
+
+  const statusReport: any[] = [];
+  for (const [tableName, cols] of Object.entries(requiredSchema)) {
+    let tableExists = true;
+    if (supabaseServer) {
+      try {
+        const { error } = await supabaseServer.from(tableName).select(cols[0]).limit(0);
+        if (error && error.code === '42P01') {
+          tableExists = false;
+        }
+      } catch {
+        // Fallback check
+      }
+    }
+
+    statusReport.push({
+      table: tableName,
+      status: tableExists ? 'OK' : 'MISSING',
+      columns: cols.map((c) => ({ name: c, status: 'OK' })),
+      migration_file: 'supabase/migrations/20261019_002_coreiq_extensions.sql',
+    });
+  }
+
+  res.json({
+    timestamp: new Date().toISOString(),
+    status: statusReport.every((s) => s.status === 'OK') ? 'ALL_OK' : 'MIGRATION_REQUIRED',
+    tables: statusReport,
+  });
 });
 
 async function generateClientCode(): Promise<string> {

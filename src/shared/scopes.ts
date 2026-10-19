@@ -47,6 +47,17 @@ export const ALL_SCOPES: ScopeDefinition[] = [
   { scope: 'quotes:write', category: 'Quotes', description: 'Draft and edit commercial quotes' },
   { scope: 'quotes:send', category: 'Quotes', description: 'Send approved quotes to clients' },
 
+  // Invoices & Billing
+  { scope: 'invoices:read', category: 'Billing', description: 'View invoices, items, and PDF generation' },
+  { scope: 'invoices:write', category: 'Billing', description: 'Create and update invoices and mark sent' },
+  { scope: 'payments:write', category: 'Billing', description: 'Record payments against invoices' },
+  { scope: 'retainers:read', category: 'Billing', description: 'View recurring retainers and schedules' },
+  { scope: 'retainers:write', category: 'Billing', description: 'Create and update retainers and generate recurring invoices' },
+
+  // Milestones & Delivery
+  { scope: 'milestones:read', category: 'Delivery', description: 'View engagement delivery milestones and tasks' },
+  { scope: 'milestones:write', category: 'Delivery', description: 'Create, update, and complete delivery milestones' },
+
   // Assets
   { scope: 'assets:read', category: 'Assets', description: 'Browse reusable software asset library' },
   { scope: 'assets:write', category: 'Assets', description: 'Add assets and log reuse events' },

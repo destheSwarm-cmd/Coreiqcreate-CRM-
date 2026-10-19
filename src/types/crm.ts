@@ -43,6 +43,10 @@ export interface PipelineStage {
   guidance_md: string;
   exit_checklist: string[];
   required_fields: string[];
+  goal?: string | null;
+  exit_criteria?: string[];
+  next_action_hint?: string | null;
+  stale_after_days?: number | null;
 }
 
 export interface Client {
@@ -67,6 +71,8 @@ export interface Client {
   created_at: string;
   updated_at: string;
   is_sample?: boolean;
+  last_followup_at?: string | null;
+  followup_count?: number;
 }
 
 export interface Contact {
@@ -86,6 +92,7 @@ export interface Contact {
 export interface Engagement {
   id: string;
   engagement_code: string;
+  human_code?: string;
   client_id: string;
   title: string;
   categories: string[];
@@ -392,7 +399,9 @@ export interface Quote {
   sent_at: string | null;
   viewed_at: string | null;
   accepted_at: string | null;
+  accepted_via?: 'email' | 'whatsapp' | 'call' | 'other' | null;
   accepted_by_name: string | null;
+  acceptance_note?: string | null;
   accepted_ip_hash: string | null;
   declined_reason: string | null;
   payment_link_url: string;
@@ -611,6 +620,7 @@ export interface AiRun {
 
 export interface DatabaseSchema {
   settings: CrmSettings;
+  business_settings?: BusinessSettings;
   users: UserProfile[];
   pipeline_stages: PipelineStage[];
   clients: Client[];
@@ -653,6 +663,11 @@ export interface DatabaseSchema {
   playbooks: Playbook[];
   nba_items: NbaItem[];
   ai_runs: AiRun[];
+  invoices?: Invoice[];
+  payments?: Payment[];
+  retainers?: Retainer[];
+  milestones?: Milestone[];
+  push_subscriptions?: PushSubscriptionRecord[];
   counters: {
     client: number;
     engagement: number;
@@ -660,6 +675,220 @@ export interface DatabaseSchema {
     deliverable: number;
     asset: number;
     request_seq: number;
+    invoice?: number;
   };
+}
+
+// -------------------------------------------------------------
+// SECTION 2 & 3: MONEY, TERMS & BUSINESS SETTINGS
+// -------------------------------------------------------------
+
+export interface PaymentMethodRow {
+  label: string;
+  value: string;
+}
+
+export interface PaymentMethod {
+  id: string;
+  type: 'eft' | 'paypal' | 'wise' | 'skrill' | 'payfast' | 'custom';
+  label: string;
+  enabled: boolean;
+  rows: PaymentMethodRow[];
+  instructions?: string;
+}
+
+export interface TermsBlocks {
+  payment_terms: string;
+  deposit_cancellation: string;
+  scope_revisions: string;
+  delivery_maintenance: string;
+  late_payment: string;
+  general: string;
+}
+
+export interface BusinessSettings {
+  id: string;
+  trading_name: string;
+  tagline: string;
+  email: string;
+  website: string;
+  address?: string;
+  registration_number?: string;
+  vat_number?: string;
+  vat_enabled: boolean;
+  vat_rate: number;
+  logo_url?: string;
+  currency: string;
+  currency_symbol: string;
+  payment_due_days: number;
+  quote_validity_days: number;
+  deposit_pct: number;
+  invoice_prefix: string;
+  quote_prefix: string;
+  project_prefix: string;
+  timezone: string;
+  next_invoice_number: number;
+  next_quote_number: number;
+  payment_methods: PaymentMethod[];
+  terms_blocks: TermsBlocks;
+  agents_paused: boolean;
+  send_mode: 'draft' | 'live';
+  followup_min_hours: number;
+  followup_max_per_stage: number;
+  invoice_reminder_days: number[];
+  quote_followup_days: number;
+  push_events: {
+    new_lead: boolean;
+    money_in: boolean;
+    build_needed: boolean;
+    retainer_due: boolean;
+    human_requested?: boolean;
+  };
+  updated_at?: string;
+}
+
+export type InvoiceStatus = 'draft' | 'sent' | 'partially_paid' | 'paid' | 'overdue' | 'void';
+
+export interface InvoiceItem {
+  id: string;
+  invoice_id: string;
+  product_id?: string | null;
+  description: string;
+  sub_description?: string | null;
+  qty: number;
+  unit_price: number;
+  discount_pct: number;
+  amount: number;
+  sort_order: number;
+}
+
+export interface Invoice {
+  id: string;
+  invoice_number: string;
+  client_id: string;
+  engagement_id?: string | null;
+  quote_id?: string | null;
+  retainer_id?: string | null;
+  status: InvoiceStatus;
+  issue_date: string;
+  due_date: string;
+  sent_at?: string | null;
+  sent_channel?: string | null;
+  sent_recipient?: string | null;
+  bill_to_snapshot: {
+    name: string;
+    attention?: string | null;
+    email?: string | null;
+    address?: string | null;
+    registration_number?: string | null;
+    vat_number?: string | null;
+  };
+  from_business_snapshot: {
+    trading_name: string;
+    tagline: string;
+    email: string;
+    website: string;
+    address?: string;
+    registration_number?: string;
+    vat_number?: string;
+  };
+  terms_snapshot: TermsBlocks;
+  selected_payment_methods: PaymentMethod[];
+  items?: InvoiceItem[];
+  subtotal: number;
+  vat_amount: number;
+  total: number;
+  amount_paid: number;
+  amount_due: number;
+  currency: string;
+  notes?: string | null;
+  is_historical?: boolean;
+  duplicate_of?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Payment {
+  id: string;
+  invoice_id: string;
+  client_id: string;
+  engagement_id?: string | null;
+  amount: number;
+  currency: string;
+  payment_date: string;
+  payment_method: string;
+  reference?: string | null;
+  notes?: string | null;
+  recorded_by_actor: string;
+  created_at: string;
+}
+
+export interface Retainer {
+  id: string;
+  client_id: string;
+  engagement_id?: string | null;
+  description: string;
+  amount: number;
+  currency: string;
+  cycle: 'monthly' | 'quarterly' | 'annual';
+  next_invoice_date: string;
+  last_invoiced_date?: string | null;
+  status: 'active' | 'paused' | 'ended';
+  start_date: string;
+  end_date?: string | null;
+  notes?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Milestone {
+  id: string;
+  engagement_id: string;
+  deliverable_id?: string | null;
+  title: string;
+  description?: string | null;
+  due_date?: string | null;
+  status: 'todo' | 'in_progress' | 'blocked' | 'done';
+  sort_order: number;
+  completed_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PushSubscriptionRecord {
+  id: string;
+  endpoint: string;
+  keys: {
+    p256dh: string;
+    auth: string;
+  };
+  user_id?: string;
+  device_name?: string;
+  created_at: string;
+}
+
+export interface FollowupDueItem {
+  id: string;
+  client_id: string;
+  client_code: string;
+  client_name: string;
+  engagement_id?: string | null;
+  stage_id?: string | null;
+  stage_name?: string | null;
+  days_in_stage: number;
+  last_contact_at?: string | null;
+  contact_details?: {
+    name?: string;
+    email?: string;
+    phone?: string;
+    whatsapp?: string;
+  };
+  suggested_action: string;
+  reason: string;
+  reminder_level: string;
+  priority: 'urgent' | 'high' | 'medium' | 'low';
+  eligible_for_followup: boolean;
+  ineligible_reason?: string;
+  escalate?: boolean;
 }
 
