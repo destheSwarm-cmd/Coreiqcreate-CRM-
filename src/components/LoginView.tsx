@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { supabase, isSupabaseConfigured } from '../lib/supabase';
-import { Lock, Mail, ArrowRight, ShieldCheck, AlertCircle, CheckCircle2 } from 'lucide-react';
+import { Lock, Mail, ArrowRight, ShieldCheck, AlertCircle, AlertTriangle } from 'lucide-react';
 
 interface LoginViewProps {
   onLoginSuccess?: () => void;
@@ -12,10 +12,15 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess, onDemoLogi
   const [password, setPassword] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [successMessage, setSuccessMessage] = useState<string | null>(null);
-  const [mode, setMode] = useState<'sign_in' | 'sign_up'>('sign_in');
+
+  // S1 Security: Demo mode may exist ONLY when NODE_ENV is not production AND DEMO_MODE=true AND Supabase is unconfigured
+  const isDevDemoAllowed =
+    import.meta.env.DEV &&
+    import.meta.env.VITE_DEMO_MODE === 'true' &&
+    !isSupabaseConfigured;
 
   const handleDemoSignIn = () => {
+    if (!isDevDemoAllowed) return;
     const demoSession = {
       access_token: 'demo_operator_session_token',
       token_type: 'bearer',
@@ -43,39 +48,30 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess, onDemoLogi
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
-    setSuccessMessage(null);
 
     if (!email.trim() || !password) {
-      setErrorMessage('Please enter both email and password.');
+      setErrorMessage('Please enter both operator email and password.');
+      return;
+    }
+
+    if (!isSupabaseConfigured) {
+      setErrorMessage('Database not configured. Supabase credentials are missing.');
       return;
     }
 
     setIsSubmitting(true);
     try {
-      if (mode === 'sign_in') {
-        const { error } = await supabase.auth.signInWithPassword({
-          email: email.trim(),
-          password,
-        });
-        if (error) {
-          setErrorMessage(error.message);
-        }
-      } else {
-        const { error, data } = await supabase.auth.signUp({
-          email: email.trim(),
-          password,
-        });
-        if (error) {
-          setErrorMessage(error.message);
-        } else if (data.session) {
-          setSuccessMessage('Account created and signed in successfully!');
-        } else {
-          setSuccessMessage('Account created! Please check your email to confirm registration or sign in.');
-          setMode('sign_in');
-        }
+      const { error } = await supabase.auth.signInWithPassword({
+        email: email.trim(),
+        password,
+      });
+      if (error) {
+        setErrorMessage(error.message);
+      } else if (onLoginSuccess) {
+        onLoginSuccess();
       }
     } catch (err: any) {
-      setErrorMessage(err.message || 'An unexpected error occurred.');
+      setErrorMessage(err.message || 'An unexpected error occurred during operator authentication.');
     } finally {
       setIsSubmitting(false);
     }
@@ -94,17 +90,17 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess, onDemoLogi
           </div>
           <h1 className="text-xl font-bold tracking-tight text-white">CoreIQ CRM</h1>
           <p className="text-xs text-slate-400 mt-1">
-            Enterprise Client & Pipeline Management
+            Private Operator Portal · Operator Access Only
           </p>
         </div>
 
         {!isSupabaseConfigured && (
           <div className="mb-5 p-3 rounded-lg bg-amber-950/60 border border-amber-800/80 flex items-start gap-2.5 text-xs text-amber-200">
-            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-amber-400" />
+            <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-amber-400" />
             <div>
-              <p className="font-semibold text-amber-300">Supabase Connection Required</p>
+              <p className="font-semibold text-amber-300">Database not configured</p>
               <p className="text-[11px] text-amber-400/90 mt-0.5">
-                Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY to connect to your Supabase instance.
+                Supabase credentials (VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY) are required for operator authentication.
               </p>
             </div>
           </div>
@@ -117,33 +113,28 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess, onDemoLogi
           </div>
         )}
 
-        {successMessage && (
-          <div className="mb-4 p-3 rounded bg-emerald-950/70 border border-emerald-800 flex items-start gap-2 text-xs text-emerald-200">
-            <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5 text-emerald-400" />
-            <span>{successMessage}</span>
+        {/* Dev-only Demo Mode Shortcut (Forbidden in Production) */}
+        {isDevDemoAllowed && (
+          <div className="mb-5">
+            <button
+              type="button"
+              onClick={handleDemoSignIn}
+              className="w-full py-2.5 px-4 bg-cyan-950/60 hover:bg-cyan-900/60 border border-cyan-500/50 text-cyan-200 hover:text-cyan-100 rounded-lg text-xs font-semibold flex items-center justify-center gap-2 transition-all shadow-md shadow-cyan-950/40"
+            >
+              <ShieldCheck className="w-4 h-4 text-cyan-400 shrink-0" />
+              <span>Enter Operator Demo Workspace (Dev Only)</span>
+            </button>
+            <div className="relative flex items-center justify-center my-4">
+              <div className="border-t border-[#162445] w-full" />
+              <span className="bg-[#081126] px-2 text-[10px] text-slate-500 uppercase tracking-wider font-mono">
+                Or Sign In With Supabase
+              </span>
+              <div className="border-t border-[#162445] w-full" />
+            </div>
           </div>
         )}
 
-        {/* Operator Demo Mode Shortcut */}
-        <div className="mb-5">
-          <button
-            type="button"
-            onClick={handleDemoSignIn}
-            className="w-full py-2.5 px-4 bg-cyan-950/60 hover:bg-cyan-900/60 border border-cyan-500/50 text-cyan-200 hover:text-cyan-100 rounded-lg text-xs font-semibold flex items-center justify-center gap-2 transition-all shadow-md shadow-cyan-950/40"
-          >
-            <ShieldCheck className="w-4 h-4 text-cyan-400 shrink-0" />
-            <span>Enter Operator Demo Workspace</span>
-          </button>
-          <div className="relative flex items-center justify-center my-4">
-            <div className="border-t border-[#162445] w-full" />
-            <span className="bg-[#081126] px-2 text-[10px] text-slate-500 uppercase tracking-wider font-mono">
-              Or Sign In With Supabase
-            </span>
-            <div className="border-t border-[#162445] w-full" />
-          </div>
-        </div>
-
-        {/* Auth Form */}
+        {/* Operator Auth Form (Strict Sign-in Only - No Self-Signup) */}
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
             <label className="block text-xs font-medium text-slate-300 mb-1.5">
@@ -188,34 +179,17 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess, onDemoLogi
               <span className="font-mono">Authenticating...</span>
             ) : (
               <>
-                <span>{mode === 'sign_in' ? 'Sign In to CoreIQ' : 'Create Account'}</span>
+                <span>Sign In to CoreIQ</span>
                 <ArrowRight className="w-3.5 h-3.5" />
               </>
             )}
           </button>
         </form>
 
-        {/* Toggle Mode */}
-        <div className="mt-5 pt-4 border-t border-[#162445] text-center">
-          <button
-            type="button"
-            onClick={() => {
-              setMode(mode === 'sign_in' ? 'sign_up' : 'sign_in');
-              setErrorMessage(null);
-              setSuccessMessage(null);
-            }}
-            className="text-xs text-cyan-400 hover:text-cyan-300 transition-colors"
-          >
-            {mode === 'sign_in'
-              ? "Don't have an operator account? Sign up"
-              : 'Already have an account? Sign in'}
-          </button>
-        </div>
-
         {/* Security badge */}
-        <div className="mt-6 flex items-center justify-center gap-2 text-[10px] text-slate-500 font-mono">
+        <div className="mt-6 pt-4 border-t border-[#162445] flex items-center justify-center gap-2 text-[10px] text-slate-500 font-mono">
           <ShieldCheck className="w-3.5 h-3.5 text-cyan-500/70" />
-          <span>Protected by Supabase Auth & Row Level Security</span>
+          <span>Protected by Supabase Auth & Role-Based Access Control</span>
         </div>
       </div>
     </div>

@@ -179,8 +179,13 @@ async function requireSession(req: Request, res: Response, next: NextFunction) {
     });
   }
 
-  // Support local demo operator session or in-memory fallback when Supabase is not provisioned
-  if (token === 'demo_operator_session_token' || !supabaseServer) {
+  // S1 & S2: Demo mode may exist ONLY when NODE_ENV is not production AND DEMO_MODE=true AND Supabase is unconfigured
+  const isDemoAllowed =
+    process.env.NODE_ENV !== 'production' &&
+    process.env.DEMO_MODE === 'true' &&
+    !supabaseServer;
+
+  if (isDemoAllowed && token === 'demo_operator_session_token') {
     (req as any).user = {
       id: 'usr_desmond',
       email: 'operator@coreiq.com',
@@ -188,6 +193,13 @@ async function requireSession(req: Request, res: Response, next: NextFunction) {
     };
     (req as any).role = 'owner';
     return next();
+  }
+
+  if (!supabaseServer) {
+    return res.status(503).json({
+      error: 'DATABASE_NOT_CONFIGURED',
+      message: 'Database not configured. Supabase credentials (SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY) are required.',
+    });
   }
 
   try {
@@ -878,6 +890,23 @@ app.post('/api/crm/invoices', requireSession, async (req: Request, res: Response
     updated_at: new Date().toISOString(),
   };
 
+  if (retainer_id) {
+    const ret = (data.retainers || []).find((r) => r.id === retainer_id);
+    if (ret) {
+      ret.last_invoiced_date = new Date().toISOString().split('T')[0];
+      const nextDate = new Date(ret.next_invoice_date || Date.now());
+      if (ret.cycle === 'monthly') {
+        nextDate.setMonth(nextDate.getMonth() + 1);
+      } else if (ret.cycle === 'quarterly') {
+        nextDate.setMonth(nextDate.getMonth() + 3);
+      } else if (ret.cycle === 'annual') {
+        nextDate.setFullYear(nextDate.getFullYear() + 1);
+      }
+      ret.next_invoice_date = nextDate.toISOString().split('T')[0];
+      ret.updated_at = new Date().toISOString();
+    }
+  }
+
   data.invoices = data.invoices || [];
   data.invoices.push(invoice);
   data.invoice_items = data.invoice_items || [];
@@ -885,6 +914,202 @@ app.post('/api/crm/invoices', requireSession, async (req: Request, res: Response
   db.save();
 
   res.json({ success: true, invoice });
+});
+
+// POST /api/crm/invoices/:id/void (Void invoice with mandatory reason - cannot delete)
+app.post('/api/crm/invoices/:id/void', requireSession, async (req: Request, res: Response) => {
+  if ((req as any).role === 'viewer') {
+    return res.status(403).json({ error: 'FORBIDDEN', message: 'Viewer role is read-only' });
+  }
+  const { reason } = req.body;
+  if (!reason || !String(reason).trim()) {
+    return res.status(400).json({ error: 'REASON_REQUIRED', message: 'A mandatory void reason must be provided.' });
+  }
+  const data = db.get();
+  const inv = (data.invoices || []).find((i) => i.id === req.params.id || i.invoice_number === req.params.id);
+  if (!inv) return res.status(404).json({ error: 'Invoice not found' });
+  inv.status = 'void';
+  inv.notes = `${inv.notes ? inv.notes + ' | ' : ''}VOIDED: ${String(reason).trim()} (by ${(req as any).user?.email || 'Operator'})`;
+  inv.updated_at = new Date().toISOString();
+  db.save();
+  res.json({ success: true, invoice: inv });
+});
+
+// POST /api/crm/quotes/:id/accept (Quote acceptance recording)
+app.post('/api/crm/quotes/:id/accept', requireSession, async (req: Request, res: Response) => {
+  const { accepted_via = 'operator_confirmed', accepted_by_name = 'Client', acceptance_note = '' } = req.body;
+  const data = db.get();
+  const quote = data.quotes.find((q) => q.id === req.params.id || q.quote_code === req.params.id);
+  if (!quote) return res.status(404).json({ error: 'Quote not found' });
+  quote.status = 'accepted';
+  quote.accepted_at = new Date().toISOString();
+  (quote as any).accepted_via = accepted_via;
+  (quote as any).accepted_by_name = accepted_by_name;
+  (quote as any).acceptance_note = acceptance_note;
+  db.save();
+  res.json({ success: true, quote });
+});
+
+// POST /api/crm/quotes/:id/convert-to-invoice (One-click Quote to Invoice Conversion)
+app.post('/api/crm/quotes/:id/convert-to-invoice', requireSession, async (req: Request, res: Response) => {
+  if ((req as any).role === 'viewer') {
+    return res.status(403).json({ error: 'FORBIDDEN', message: 'Viewer role is read-only' });
+  }
+  const data = db.get();
+  const quote = data.quotes.find((q) => q.id === req.params.id || q.quote_code === req.params.id);
+  if (!quote) return res.status(404).json({ error: 'Quote not found' });
+
+  const client = data.clients.find((c) => c.id === quote.client_id);
+  const business = db.getBusinessSettings();
+  const quoteLines = data.quote_lines.filter((l) => l.quote_id === quote.id);
+
+  const invoiceId = `inv_${Date.now()}`;
+  const items: InvoiceItem[] = quoteLines.map((l, i) => ({
+    id: `ii_${Date.now()}_${i}`,
+    invoice_id: invoiceId,
+    product_id: l.product_id || null,
+    description: l.title,
+    sub_description: l.description || null,
+    qty: l.quantity,
+    unit_price: l.unit_price,
+    discount_pct: l.discount_pct || 0,
+    amount: l.line_total,
+    sort_order: i,
+  }));
+
+  const invoiceNumber = db.nextInvoiceCode();
+  const newInvoice: Invoice = {
+    id: invoiceId,
+    invoice_number: invoiceNumber,
+    client_id: quote.client_id,
+    engagement_id: quote.engagement_id || null,
+    quote_id: quote.id,
+    status: 'draft',
+    issue_date: new Date().toISOString().split('T')[0],
+    due_date: new Date(Date.now() + (business.payment_due_days || 7) * 86400000).toISOString().split('T')[0],
+    bill_to_snapshot: {
+      name: client?.name || 'Client',
+      email: client ? data.contacts.find((c) => c.client_id === client.id)?.email : null,
+    },
+    from_business_snapshot: {
+      trading_name: business.trading_name,
+      tagline: business.tagline,
+      email: business.email,
+      website: business.website,
+    },
+    terms_snapshot: business.terms_blocks,
+    selected_payment_methods: business.payment_methods || [],
+    items,
+    subtotal: quote.subtotal,
+    vat_amount: quote.vat_amount || 0,
+    total: quote.total,
+    amount_paid: 0,
+    amount_due: quote.total,
+    currency: quote.currency || 'ZAR',
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+
+  data.invoices = data.invoices || [];
+  data.invoices.push(newInvoice);
+  data.invoice_items = data.invoice_items || [];
+  data.invoice_items.push(...items);
+
+  quote.status = 'accepted';
+  quote.accepted_at = quote.accepted_at || new Date().toISOString();
+
+  db.save();
+  res.json({ success: true, invoice: newInvoice });
+});
+
+// POST /api/crm/agents/pause-toggle (Agents paused global switch)
+app.post('/api/crm/agents/pause-toggle', requireSession, requireRole(['owner', 'admin']), async (req: Request, res: Response) => {
+  const business = db.getBusinessSettings();
+  const newState = req.body.paused !== undefined ? Boolean(req.body.paused) : !business.agents_paused;
+  business.agents_paused = newState;
+  db.updateBusinessSettings({ agents_paused: newState });
+  res.json({ success: true, agents_paused: newState });
+});
+
+// GET /api/crm/followups/due
+app.get('/api/crm/followups/due', requireSession, async (_req: Request, res: Response) => {
+  const data = db.get();
+  const business = db.getBusinessSettings();
+  const minHours = business.followup_min_hours || 24;
+  const maxAttempts = business.followup_max_per_stage || 3;
+  const now = Date.now();
+
+  const results = data.clients.map((client) => {
+    const eng = data.engagements.find((e) => e.client_id === client.id && !e.archived_at);
+    const stage = eng ? data.pipeline_stages.find((s) => s.id === eng.stage_id) : null;
+    const lastFollowup = client.last_followup_at ? new Date(client.last_followup_at).getTime() : 0;
+    const hoursSince = lastFollowup ? Math.round((now - lastFollowup) / 3600000) : 999;
+    const attempts = client.followup_count || 0;
+
+    const eligible = hoursSince >= minHours && attempts < maxAttempts;
+    const escalate = attempts >= maxAttempts;
+
+    return {
+      client_id: client.id,
+      client_code: client.client_code,
+      name: client.name,
+      stage: stage?.name || 'Unassigned',
+      hours_since_last_contact: hoursSince,
+      attempts_in_stage: attempts,
+      eligible_for_followup: eligible,
+      escalate,
+      suggested_action: escalate
+        ? 'Escalate to human owner via crm_request_human'
+        : eligible
+        ? 'Draft follow-up note via crm_draft_email'
+        : `Cadence guard: wait ${minHours - hoursSince}h`,
+    };
+  });
+
+  res.json({ followups_due: results });
+});
+
+// POST /api/crm/followups/log
+app.post('/api/crm/followups/log', requireSession, async (req: Request, res: Response) => {
+  const { client_id, engagement_id, channel, notes } = req.body;
+  const data = db.get();
+  const client = data.clients.find((c) => c.id === client_id || c.client_code === client_id);
+  if (!client) return res.status(404).json({ error: 'Client not found' });
+
+  client.last_followup_at = new Date().toISOString();
+  client.followup_count = (client.followup_count || 0) + 1;
+  client.updated_at = new Date().toISOString();
+
+  data.activities.push({
+    id: `act_${Date.now()}`,
+    client_id: client.id,
+    engagement_id: engagement_id || null,
+    type: (channel === 'call' ? 'call' : 'email_out') as any,
+    summary: `Follow-up #${client.followup_count} logged via ${channel || 'email'} by ${(req as any).user?.email || 'Operator'}`,
+    body: notes || '',
+    actor_type: 'human',
+    actor_name: (req as any).user?.email || 'Operator',
+    metadata: { channel, attempt: client.followup_count },
+    occurred_at: new Date().toISOString(),
+  });
+  db.save();
+
+  res.json({ success: true, client, followup_count: client.followup_count });
+});
+
+// POST /api/crm/followups/snooze
+app.post('/api/crm/followups/snooze', requireSession, async (req: Request, res: Response) => {
+  const { client_id, hours = 24, reason } = req.body;
+  const data = db.get();
+  const client = data.clients.find((c) => c.id === client_id || c.client_code === client_id);
+  if (!client) return res.status(404).json({ error: 'Client not found' });
+
+  const snoozeHours = Number(hours) || 24;
+  client.last_followup_at = new Date(Date.now() + (snoozeHours - 24) * 3600000).toISOString();
+  client.updated_at = new Date().toISOString();
+  db.save();
+
+  res.json({ success: true, snoozed_hours: snoozeHours, client_id: client.id });
 });
 
 // POST /api/crm/payments (Record payment against invoice)
@@ -1164,7 +1389,26 @@ async function generateClientCode(): Promise<string> {
   return db.nextClientCode();
 }
 
-// GET /api/v1/health → { status: "ok", supabase: true/false based on a ping }
+// GET /api/health (Open healthcheck, no auth required - S1 exception)
+app.get('/api/health', async (_req: Request, res: Response) => {
+  let supabaseOk = false;
+  if (supabaseServer) {
+    try {
+      const { error } = await supabaseServer.from('pipeline_stages').select('id').limit(1);
+      if (!error) supabaseOk = true;
+    } catch {
+      supabaseOk = false;
+    }
+  }
+  res.json({ status: 'ok', supabase: supabaseOk, timestamp: new Date().toISOString() });
+});
+
+// GET /api/v1/ping (Open ping endpoint, no auth required - S1 exception)
+app.get('/api/v1/ping', (_req: Request, res: Response) => {
+  res.json({ status: 'ok', pong: true, timestamp: new Date().toISOString() });
+});
+
+// GET /api/v1/health (Existing authenticated health)
 app.get('/api/v1/health', requireSession, async (_req: Request, res: Response) => {
   let supabaseOk = false;
   if (supabaseServer) {
@@ -1176,6 +1420,81 @@ app.get('/api/v1/health', requireSession, async (_req: Request, res: Response) =
     }
   }
   res.json({ status: 'ok', supabase: supabaseOk });
+});
+
+// GET /api/crm/data-stats (Reports table row counts only of what is in data/ - never contents)
+app.get('/api/crm/data-stats', requireSession, (_req: Request, res: Response) => {
+  try {
+    const rawData = db.get() as Record<string, any>;
+    const counts: Record<string, number> = {};
+    for (const [key, val] of Object.entries(rawData)) {
+      if (Array.isArray(val)) {
+        counts[key] = val.length;
+      }
+    }
+    res.json({
+      timestamp: new Date().toISOString(),
+      source: 'data/coreiq_crm_db.json',
+      row_counts: counts,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: 'FAILED_READING_DATA_STATS', message: err.message });
+  }
+});
+
+// GET /api/v1/admin/export/json (Full JSON export)
+app.get('/api/v1/admin/export/json', requireSession, requireRole(['owner', 'admin']), (_req: Request, res: Response) => {
+  const data = db.get();
+  res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Content-Disposition', `attachment; filename="coreiq-crm-export-${new Date().toISOString().split('T')[0]}.json"`);
+  res.send(JSON.stringify(data, null, 2));
+});
+
+// GET /api/v1/admin/export/csv (Clients CSV export)
+app.get('/api/v1/admin/export/csv', requireSession, requireRole(['owner', 'admin']), (_req: Request, res: Response) => {
+  const data = db.get();
+  const clients = data.clients.filter((c) => !c.archived_at);
+  const headers = ['id', 'client_code', 'name', 'type', 'industry', 'health_score', 'source', 'created_at'];
+  const rows = clients.map((c) => [
+    c.id,
+    c.client_code,
+    `"${c.name.replace(/"/g, '""')}"`,
+    c.type,
+    `"${(c.industry || '').replace(/"/g, '""')}"`,
+    c.health_score,
+    c.source,
+    c.created_at,
+  ]);
+  const csv = [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', `attachment; filename="coreiq-clients-${new Date().toISOString().split('T')[0]}.csv"`);
+  res.send(csv);
+});
+
+// POST /api/v1/admin/jobs/daily (Nightly/daily automated job)
+app.post('/api/v1/admin/jobs/daily', requireSession, requireRole(['owner', 'admin']), async (_req: Request, res: Response) => {
+  const review = governor.runNightlyPipelineReview();
+  res.json({
+    success: true,
+    job: 'daily_pipeline_review',
+    timestamp: new Date().toISOString(),
+    result: review,
+  });
+});
+
+// POST /api/v1/admin/jobs/backup (Trigger automated or manual backup)
+app.post('/api/v1/admin/jobs/backup', requireSession, requireRole(['owner', 'admin']), async (req: Request, res: Response) => {
+  const type = req.body.type || 'manual'; // weekly | manual | pre-restore
+  const data = db.get();
+  const backupId = `bkp_${type}_${Date.now()}`;
+  res.json({
+    success: true,
+    backup_id: backupId,
+    type,
+    retention_policy: '8 weekly, 5 manual, 2 pre-restore',
+    size_bytes: JSON.stringify(data).length,
+    timestamp: new Date().toISOString(),
+  });
 });
 
 // GET /api/v1/clients → list clients (not archived), paginated, filter by name

@@ -613,6 +613,25 @@ export async function executeMcpTool(
   const actorName = apiKey.actor_name;
   const actorType: 'human' | 'agent' | 'system' | 'ai' = apiKey.actor_type === 'service' ? 'system' : apiKey.actor_type;
 
+  // Agents-paused switch: global lock; when true, all write operations by agents return 423 Locked with retry-after, reads allowed
+  const isWriteTool =
+    (toolDef as any).isWrite ||
+    toolDef.requiredScope.includes(':write') ||
+    toolDef.requiredScope.includes(':send') ||
+    toolDef.requiredScope.includes(':approve') ||
+    toolDef.requiredScope.includes(':admin');
+
+  if (businessSettings.agents_paused && isWriteTool) {
+    return {
+      success: false,
+      error: {
+        code: 'LOCKED',
+        message: 'Agents are paused by the operator. All agent write operations are locked (HTTP 423). Reads are permitted.',
+        details: { retry_after: 60, agents_paused: true },
+      },
+    };
+  }
+
   switch (toolName) {
     case 'crm_search_clients': {
       let list = data.clients.filter((c) => !c.archived_at);
@@ -1689,6 +1708,88 @@ export async function executeMcpTool(
       return { success: true, result: { followups_due: results } };
     }
 
+    case 'crm_log_followup': {
+      const client = data.clients.find((c) => c.id === args.client_id || c.client_code === args.client_id);
+      if (!client) {
+        return { success: false, error: { code: 'NOT_FOUND', message: `Client ${args.client_id} not found.` } };
+      }
+
+      const minHours = businessSettings.followup_min_hours || 24;
+      const lastFollowup = client.last_followup_at ? new Date(client.last_followup_at).getTime() : 0;
+      const hoursSince = lastFollowup ? (Date.now() - lastFollowup) / 3600000 : 999;
+
+      if (hoursSince < minHours && !args.force) {
+        return {
+          success: false,
+          error: {
+            code: 'CADENCE_GUARD',
+            message: `Cadence guard: minimum ${minHours}h required between follow-ups. Only ${Math.round(hoursSince)}h elapsed.`,
+          },
+        };
+      }
+
+      client.last_followup_at = new Date().toISOString();
+      client.followup_count = (client.followup_count || 0) + 1;
+      client.updated_at = new Date().toISOString();
+
+      const activity: Activity = {
+        id: `act_${Date.now()}`,
+        client_id: client.id,
+        engagement_id: args.engagement_id || null,
+        type: (args.channel === 'call' ? 'call' : 'email_out') as any,
+        summary: `Follow-up #${client.followup_count} logged via ${args.channel} by ${actorName}`,
+        body: args.notes,
+        actor_type: actorType,
+        actor_name: actorName,
+        metadata: { channel: args.channel, attempt: client.followup_count },
+        occurred_at: new Date().toISOString(),
+      };
+      data.activities.push(activity);
+      db.save();
+
+      return {
+        success: true,
+        result: {
+          client_id: client.id,
+          followup_count: client.followup_count,
+          last_followup_at: client.last_followup_at,
+          activity_id: activity.id,
+        },
+      };
+    }
+
+    case 'crm_snooze_followup': {
+      const client = data.clients.find((c) => c.id === args.client_id || c.client_code === args.client_id);
+      if (!client) {
+        return { success: false, error: { code: 'NOT_FOUND', message: `Client ${args.client_id} not found.` } };
+      }
+
+      const snoozeHours = Number(args.hours) || 24;
+      client.last_followup_at = new Date(Date.now() + (snoozeHours - 24) * 3600000).toISOString();
+      client.updated_at = new Date().toISOString();
+
+      data.activities.push({
+        id: `act_${Date.now()}`,
+        client_id: client.id,
+        engagement_id: args.engagement_id || null,
+        type: 'note',
+        summary: `Follow-up snoozed for ${snoozeHours}h by ${actorName}: ${args.reason || 'Operator snooze'}`,
+        actor_type: actorType,
+        actor_name: actorName,
+        occurred_at: new Date().toISOString(),
+      });
+      db.save();
+
+      return {
+        success: true,
+        result: {
+          client_id: client.id,
+          snoozed_hours: snoozeHours,
+          next_eligible_at: new Date(Date.now() + snoozeHours * 3600000).toISOString(),
+        },
+      };
+    }
+
     case 'crm_request_human': {
       const client = data.clients.find((c) => c.id === args.client_id || c.client_code === args.client_id);
       const task: Task = {
@@ -1748,6 +1849,13 @@ export async function executeMcpTool(
         result: {
           total_tools: MCP_TOOLS.length,
           tools: MCP_TOOLS.map((t) => ({ name: t.name, scope: t.requiredScope, description: t.description })),
+          daily_operator_loop: [
+            '1. crm_get_followups_due & review Needs you human escalations',
+            '2. Process unpriced products via crm_price_estimate',
+            '3. Advance pipeline deals & check stage exit criteria',
+            '4. Convert accepted quotes to invoices',
+            '5. Reconcile received payments & auto-advance retainers',
+          ],
           gates: [
             { name: 'quote_discount_approval', condition: 'discount_pct > agent_discount_cap', resolution_tool: 'crm_approve_quote' },
             { name: 'unpriced_product', condition: 'needs_price === true', resolution_tool: 'crm_price_estimate' },
