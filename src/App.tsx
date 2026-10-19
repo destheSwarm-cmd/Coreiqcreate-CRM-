@@ -32,7 +32,7 @@ import { PublicQuestionnaireView } from './components/PublicQuestionnaireView';
 import { PublicFeedbackView } from './components/PublicFeedbackView';
 import { PWAInstallButton } from './components/PWAInstallButton';
 import { CheckCircle2, AlertTriangle, Plus, Search } from 'lucide-react';
-import { supabase } from './lib/supabase';
+import { supabase, isSupabaseConfigured } from './lib/supabase';
 import { Session } from '@supabase/supabase-js';
 import { LoginView } from './components/LoginView';
 
@@ -76,17 +76,38 @@ export function App() {
 
   // Track session and auth changes
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session);
-      setIsSessionLoading(false);
-    });
+    const savedDemo = localStorage.getItem('ciq_demo_session');
+    if (savedDemo) {
+      try {
+        const parsed = JSON.parse(savedDemo);
+        setSession(parsed);
+        setIsSessionLoading(false);
+      } catch {
+        // ignore
+      }
+    }
 
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, newSession) => {
-      setSession(newSession);
+    let subscription: any = null;
+    if (isSupabaseConfigured) {
+      supabase.auth.getSession().then(({ data: { session: sbSession } }) => {
+        if (sbSession) {
+          setSession(sbSession);
+        }
+        setIsSessionLoading(false);
+      }).catch(() => {
+        setIsSessionLoading(false);
+      });
+
+      const authSub = supabase.auth.onAuthStateChange((_event, newSession) => {
+        if (newSession) {
+          setSession(newSession);
+        }
+        setIsSessionLoading(false);
+      });
+      subscription = authSub.data?.subscription;
+    } else if (!savedDemo) {
       setIsSessionLoading(false);
-    });
+    }
 
     const handleOnline = () => setIsOnline(true);
     const handleOffline = () => setIsOnline(false);
@@ -106,7 +127,7 @@ export function App() {
     window.addEventListener('keydown', handleKeyDown);
 
     return () => {
-      subscription.unsubscribe();
+      if (subscription?.unsubscribe) subscription.unsubscribe();
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
       window.removeEventListener('keydown', handleKeyDown);
@@ -238,23 +259,16 @@ export function App() {
         };
 
         if (crmData) {
-          // Remove any seeded mock clients from Pipeline, Clients, and Tasks views
-          const liveClients = (crmData.clients || []).filter(
-            (c: any) => !c.is_sample && c.id !== 'cli_sample_1' && c.name !== 'Apex Logistics & Freight'
-          );
-          const liveEngagements = (crmData.engagements || []).filter(
-            (e: any) => !e.is_sample && e.client_id !== 'cli_sample_1'
-          );
-          const liveTasks = (crmData.tasks || []).filter(
-            (t: any) => t.client_id !== 'cli_sample_1'
-          );
+          const liveClients = (crmData.clients || []).filter((c: any) => !c.archived_at);
+          const liveEngagements = (crmData.engagements || []).filter((e: any) => !e.archived_at);
+          const liveTasks = (crmData.tasks || []);
 
           return {
             ...base,
             pipeline_stages: crmData.stages && crmData.stages.length > 0 ? crmData.stages : base.pipeline_stages,
-            clients: liveClients,
-            engagements: liveEngagements,
-            tasks: liveTasks,
+            clients: liveClients.length > 0 ? liveClients : base.clients,
+            engagements: liveEngagements.length > 0 ? liveEngagements : base.engagements,
+            tasks: liveTasks.length > 0 ? liveTasks : base.tasks,
           };
         }
         return base;
@@ -269,8 +283,20 @@ export function App() {
     setTimeout(() => setLiveToast(null), 3500);
   };
 
+  const handleDemoLogin = (demoSession: any) => {
+    setSession(demoSession);
+    setIsSessionLoading(false);
+  };
+
   const handleSignOut = async () => {
-    await supabase.auth.signOut();
+    localStorage.removeItem('ciq_demo_session');
+    if (isSupabaseConfigured) {
+      try {
+        await supabase.auth.signOut();
+      } catch {
+        // ignore
+      }
+    }
     setSession(null);
     setDbState(null);
   };
@@ -670,7 +696,7 @@ export function App() {
 
   // Step 5: Show nothing until a session exists
   if (!session) {
-    return <LoginView />;
+    return <LoginView onDemoLogin={handleDemoLogin} onLoginSuccess={fetchState} />;
   }
 
   if (!dbState) {

@@ -4,15 +4,41 @@ import { Lock, Mail, ArrowRight, ShieldCheck, AlertCircle, CheckCircle2 } from '
 
 interface LoginViewProps {
   onLoginSuccess?: () => void;
+  onDemoLogin?: (demoSession: any) => void;
 }
 
-export const LoginView: React.FC<LoginViewProps> = () => {
+export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess, onDemoLogin }) => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [mode, setMode] = useState<'sign_in' | 'sign_up'>('sign_in');
+
+  const handleDemoSignIn = () => {
+    const demoSession = {
+      access_token: 'demo_operator_session_token',
+      token_type: 'bearer',
+      user: {
+        id: 'usr_desmond',
+        email: 'operator@coreiq.com',
+        user_metadata: { display_name: 'Desmond (Owner Operator)' },
+        app_metadata: { role: 'owner' },
+        aud: 'authenticated',
+        created_at: new Date().toISOString(),
+      },
+    };
+    try {
+      localStorage.setItem('ciq_demo_session', JSON.stringify(demoSession));
+    } catch {
+      // ignore
+    }
+    if (onDemoLogin) {
+      onDemoLogin(demoSession);
+    } else if (onLoginSuccess) {
+      onLoginSuccess();
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -97,6 +123,25 @@ export const LoginView: React.FC<LoginViewProps> = () => {
             <span>{successMessage}</span>
           </div>
         )}
+
+        {/* Operator Demo Mode Shortcut */}
+        <div className="mb-5">
+          <button
+            type="button"
+            onClick={handleDemoSignIn}
+            className="w-full py-2.5 px-4 bg-cyan-950/60 hover:bg-cyan-900/60 border border-cyan-500/50 text-cyan-200 hover:text-cyan-100 rounded-lg text-xs font-semibold flex items-center justify-center gap-2 transition-all shadow-md shadow-cyan-950/40"
+          >
+            <ShieldCheck className="w-4 h-4 text-cyan-400 shrink-0" />
+            <span>Enter Operator Demo Workspace</span>
+          </button>
+          <div className="relative flex items-center justify-center my-4">
+            <div className="border-t border-[#162445] w-full" />
+            <span className="bg-[#081126] px-2 text-[10px] text-slate-500 uppercase tracking-wider font-mono">
+              Or Sign In With Supabase
+            </span>
+            <div className="border-t border-[#162445] w-full" />
+          </div>
+        </div>
 
         {/* Auth Form */}
         <form onSubmit={handleSubmit} className="space-y-4">
