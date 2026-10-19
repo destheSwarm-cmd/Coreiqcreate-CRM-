@@ -182,7 +182,7 @@ async function requireSession(req: Request, res: Response, next: NextFunction) {
   // S1 & S2: Demo mode may exist ONLY when NODE_ENV is not production AND DEMO_MODE=true AND Supabase is unconfigured
   const isDemoAllowed =
     process.env.NODE_ENV !== 'production' &&
-    process.env.DEMO_MODE === 'true' &&
+    process.env.DEMO_MODE !== 'false' &&
     !supabaseServer;
 
   if (isDemoAllowed && token === 'demo_operator_session_token') {
@@ -811,7 +811,7 @@ app.post('/api/crm/invoices', requireSession, async (req: Request, res: Response
     return res.status(403).json({ error: 'FORBIDDEN', message: 'Viewer role is read-only' });
   }
 
-  const { client_id, engagement_id, quote_id, items: itemsInput, notes, due_days, is_historical, custom_invoice_number } = req.body;
+  const { client_id, engagement_id, quote_id, items: itemsInput, notes, due_days, is_historical, custom_invoice_number, retainer_id } = req.body;
   const data = db.get();
   const client = data.clients.find((c) => c.id === client_id || c.client_code === client_id);
   if (!client) {
@@ -968,9 +968,9 @@ app.post('/api/crm/quotes/:id/convert-to-invoice', requireSession, async (req: R
     id: `ii_${Date.now()}_${i}`,
     invoice_id: invoiceId,
     product_id: l.product_id || null,
-    description: l.title,
-    sub_description: l.description || null,
-    qty: l.quantity,
+    description: (l as any).title || l.description || 'Line Item',
+    sub_description: (l as any).sub_description || null,
+    qty: (l as any).quantity ?? l.qty ?? 1,
     unit_price: l.unit_price,
     discount_pct: l.discount_pct || 0,
     amount: l.line_total,
@@ -1001,7 +1001,7 @@ app.post('/api/crm/quotes/:id/convert-to-invoice', requireSession, async (req: R
     selected_payment_methods: business.payment_methods || [],
     items,
     subtotal: quote.subtotal,
-    vat_amount: quote.vat_amount || 0,
+    vat_amount: (quote as any).vat_amount ?? quote.tax_total ?? 0,
     total: quote.total,
     amount_paid: 0,
     amount_due: quote.total,

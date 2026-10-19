@@ -1774,8 +1774,10 @@ export async function executeMcpTool(
         engagement_id: args.engagement_id || null,
         type: 'note',
         summary: `Follow-up snoozed for ${snoozeHours}h by ${actorName}: ${args.reason || 'Operator snooze'}`,
+        body: args.reason || '',
         actor_type: actorType,
         actor_name: actorName,
+        metadata: { snooze_hours: snoozeHours, reason: args.reason || null },
         occurred_at: new Date().toISOString(),
       });
       db.save();
