@@ -31,10 +31,9 @@ export const supabaseServer: SupabaseClient | null = (SUPABASE_URL && SUPABASE_S
     })
   : null;
 
-// Security Headers (Section 10)
+// Security Headers (Section 10) - Permitting iframe embedding for AI Studio
 app.use((_req: Request, res: Response, next: NextFunction) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('X-XSS-Protection', '1; mode=block');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
   next();
@@ -3026,7 +3025,7 @@ async function startServer() {
     const vitePkg = 'vite';
     const { createServer: createViteServer } = await import(vitePkg);
     vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: { middlewareMode: true, allowedHosts: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);

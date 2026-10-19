@@ -1021,13 +1021,13 @@ function getInitialDatabase(): DatabaseSchema {
       },
     ],
     pipeline_stages: seededStages,
-    clients: [],
-    contacts: [],
-    engagements: [],
+    clients: [sampleClient],
+    contacts: [sampleContact],
+    engagements: [sampleEngagement],
     stage_history: [],
-    requests: [],
-    activities: [],
-    tasks: [],
+    requests: [sampleRequest],
+    activities: [sampleActivity],
+    tasks: [sampleTask],
     custom_field_defs: [
       {
         id: 'cf_1',
@@ -1455,6 +1455,15 @@ class DatabaseManager {
         if (!loaded.counters) loaded.counters = {};
         if (loaded.counters.invoice === undefined) loaded.counters.invoice = 1;
         if (loaded.counters.project === undefined) loaded.counters.project = 0;
+        if (!loaded.clients || loaded.clients.length === 0) {
+          const fresh = getInitialDatabase();
+          loaded.clients = fresh.clients;
+          loaded.contacts = fresh.contacts;
+          loaded.engagements = fresh.engagements;
+          loaded.requests = fresh.requests;
+          loaded.activities = fresh.activities;
+          loaded.tasks = fresh.tasks;
+        }
         return loaded;
       }
     } catch (e) {
