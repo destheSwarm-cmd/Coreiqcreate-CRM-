@@ -13,10 +13,11 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLoginSuccess, onDemoLogi
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // S1 Security: Demo mode may exist ONLY when NODE_ENV is not production AND DEMO_MODE!=false AND Supabase is unconfigured
+  // S1 Security: Demo mode may exist ONLY when NODE_ENV is not production AND DEMO_MODE=true AND Supabase is unconfigured
+  const isProduction = import.meta.env.PROD || import.meta.env.MODE === 'production';
   const isDevDemoAllowed =
-    (import.meta.env.DEV || import.meta.env.MODE !== 'production') &&
-    import.meta.env.VITE_DEMO_MODE !== 'false' &&
+    !isProduction &&
+    import.meta.env.VITE_DEMO_MODE === 'true' &&
     !isSupabaseConfigured;
 
   const handleDemoSignIn = () => {

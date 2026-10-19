@@ -24,6 +24,12 @@ import {
   Trash2,
   Paperclip,
   Share2,
+  FileText,
+  DollarSign,
+  ListChecks,
+  ArrowUp,
+  ArrowDown,
+  Download,
 } from 'lucide-react';
 import {
   Client,
@@ -40,6 +46,8 @@ import {
   SamplingCost,
   NbaItem,
   CrmSettings,
+  Invoice,
+  Milestone,
 } from '../types/crm';
 
 interface ClientCardProps {
@@ -57,6 +65,9 @@ interface ClientCardProps {
   samplingCosts: SamplingCost[];
   nbaItems: NbaItem[];
   settings: CrmSettings;
+  invoices?: Invoice[];
+  milestones?: Milestone[];
+  onRefreshMilestones?: () => void;
   onClose: () => void;
   onMoveStage: (engagementId: string, toStageId: string, reason: string, override: boolean) => void;
   onAddTask: (task: Partial<Task>) => void;
@@ -86,6 +97,9 @@ export const ClientCard: React.FC<ClientCardProps> = ({
   samplingCosts,
   nbaItems,
   settings,
+  invoices = [],
+  milestones = [],
+  onRefreshMilestones,
   onClose,
   onMoveStage,
   onAddTask,
@@ -106,6 +120,38 @@ export const ClientCard: React.FC<ClientCardProps> = ({
     targetStageId: '',
     reason: '',
   });
+
+  // Milestones state
+  const [localMilestones, setLocalMilestones] = useState<Milestone[]>(milestones);
+  const [newMilestoneTitle, setNewMilestoneTitle] = useState('');
+  const [newMilestoneDue, setNewMilestoneDue] = useState('');
+  const [isSavingMilestone, setIsSavingMilestone] = useState(false);
+
+  useEffect(() => {
+    if (milestones) {
+      setLocalMilestones(milestones);
+    }
+  }, [milestones]);
+
+  // Android back-button popstate handling
+  useEffect(() => {
+    window.history.pushState({ modal: 'client-card' }, '');
+    const handlePopState = () => {
+      onClose();
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => {
+      window.removeEventListener('popstate', handlePopState);
+    };
+  }, [onClose]);
+
+  const handleClose = () => {
+    if (window.history.state?.modal === 'client-card') {
+      window.history.back();
+    } else {
+      onClose();
+    }
+  };
 
   // Modal states for adding items
   const [showNewTaskModal, setShowNewTaskModal] = useState(false);
@@ -138,8 +184,117 @@ export const ClientCard: React.FC<ClientCardProps> = ({
   const isOverSla = currentStage?.sla_days ? daysInStage > currentStage.sla_days : false;
   const isNearSla = currentStage?.sla_days ? daysInStage >= currentStage.sla_days * 0.8 && !isOverSla : false;
 
+  const engagementMilestones = localMilestones
+    .filter((m) => currentEngagement && m.engagement_id === currentEngagement.id)
+    .sort((a, b) => a.sort_order - b.sort_order);
+
+  const clientInvoices = (invoices || []).filter((inv) => inv.client_id === client.id);
+
+  const handleAddMilestone = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newMilestoneTitle.trim() || !currentEngagement) return;
+    setIsSavingMilestone(true);
+    try {
+      const resp = await fetch('/api/crm/milestones', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${localStorage.getItem('ciq_demo_session') ? 'demo_operator_session_token' : ''}`,
+        },
+        body: JSON.stringify({
+          engagement_id: currentEngagement.id,
+          title: newMilestoneTitle.trim(),
+          due_date: newMilestoneDue || undefined,
+        }),
+      });
+      if (resp.ok) {
+        const json = await resp.json();
+        if (json.milestone) {
+          setLocalMilestones((prev) => [...prev, json.milestone]);
+          setNewMilestoneTitle('');
+          setNewMilestoneDue('');
+          if (onRefreshMilestones) onRefreshMilestones();
+        }
+      }
+    } catch (err) {
+      console.warn('Failed to add milestone:', err);
+    } finally {
+      setIsSavingMilestone(false);
+    }
+  };
+
+  const handleToggleMilestone = async (mId: string, currentStatus: string) => {
+    const nextStatus = currentStatus === 'done' ? 'todo' : 'done';
+    setLocalMilestones((prev) =>
+      prev.map((m) => (m.id === mId ? { ...m, status: nextStatus as any, completed_at: nextStatus === 'done' ? new Date().toISOString() : null } : m))
+    );
+    try {
+      await fetch(`/api/crm/milestones/${mId}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${localStorage.getItem('ciq_demo_session') ? 'demo_operator_session_token' : ''}`,
+        },
+        body: JSON.stringify({ status: nextStatus }),
+      });
+      if (onRefreshMilestones) onRefreshMilestones();
+    } catch (err) {
+      console.warn('Failed to toggle milestone:', err);
+    }
+  };
+
+  const handleMoveMilestone = async (mId: string, direction: 'up' | 'down') => {
+    const engList = localMilestones
+      .filter((m) => currentEngagement && m.engagement_id === currentEngagement.id)
+      .sort((a, b) => a.sort_order - b.sort_order);
+    const index = engList.findIndex((m) => m.id === mId);
+    if (index === -1) return;
+    const targetIndex = direction === 'up' ? index - 1 : index + 1;
+    if (targetIndex < 0 || targetIndex >= engList.length) return;
+
+    const currentItem = engList[index];
+    const adjacentItem = engList[targetIndex];
+
+    const currentOrder = currentItem.sort_order;
+    const adjacentOrder = adjacentItem.sort_order;
+
+    setLocalMilestones((prev) =>
+      prev.map((m) => {
+        if (m.id === currentItem.id) return { ...m, sort_order: adjacentOrder };
+        if (m.id === adjacentItem.id) return { ...m, sort_order: currentOrder };
+        return m;
+      })
+    );
+
+    try {
+      await Promise.all([
+        fetch(`/api/crm/milestones/${currentItem.id}`, {
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${localStorage.getItem('ciq_demo_session') ? 'demo_operator_session_token' : ''}`,
+          },
+          body: JSON.stringify({ sort_order: adjacentOrder }),
+        }),
+        fetch(`/api/crm/milestones/${adjacentItem.id}`, {
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${localStorage.getItem('ciq_demo_session') ? 'demo_operator_session_token' : ''}`,
+          },
+          body: JSON.stringify({ sort_order: currentOrder }),
+        }),
+      ]);
+      if (onRefreshMilestones) onRefreshMilestones();
+    } catch (err) {
+      console.warn('Failed to reorder milestones:', err);
+    }
+  };
+
   const tabs = [
     { id: 'overview', label: 'Overview' },
+    { id: 'invoices', label: `Invoices (${clientInvoices.length})` },
+    { id: 'milestones', label: `Milestones (${engagementMilestones.length})` },
     { id: 'requests', label: `Requests (${requests.length})` },
     { id: 'discovery', label: `Discovery (${questionnaires.length})` },
     { id: 'sampling', label: `Sampling (${deliverables.filter((d) => d.is_sample).length})` },

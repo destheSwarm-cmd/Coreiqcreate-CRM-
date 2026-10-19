@@ -35,6 +35,8 @@ import { CheckCircle2, AlertTriangle, Plus, Search } from 'lucide-react';
 import { supabase, isSupabaseConfigured } from './lib/supabase';
 import { Session } from '@supabase/supabase-js';
 import { LoginView } from './components/LoginView';
+import { MoneyView } from './components/MoneyView';
+import { AgentActivityView } from './components/AgentActivityView';
 
 export function App() {
   // Check for public token-based route access
@@ -896,6 +898,24 @@ export function App() {
             apiKeys={dbState.api_keys}
             onCreateKey={handleCreateKey}
             onRevokeKey={handleRevokeKey}
+          />
+        )}
+
+        {currentView === 'money' && (
+          <MoneyView
+            sessionToken={session?.access_token || 'demo_operator_session_token'}
+            clients={dbState.clients}
+            products={dbState.products}
+            businessSettings={dbState.business_settings}
+            onRefresh={fetchState}
+            showToast={showToast}
+            onNavigateToClient={(clientId) => setSelectedClientId(clientId)}
+          />
+        )}
+
+        {currentView === 'agent_activity' && (
+          <AgentActivityView
+            sessionToken={session?.access_token || 'demo_operator_session_token'}
           />
         )}
 

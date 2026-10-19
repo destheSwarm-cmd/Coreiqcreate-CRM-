@@ -3,14 +3,15 @@
 @layer base {
   :root {
     --bg-base: #04091a;
-    --bg-surface: #0a1329;
-    --bg-elevated: #0f1c3d;
+    --bg-surface: #081126;
+    --bg-elevated: #0d1a38;
     --bg-hover: #15264f;
     --border-subtle: #162445;
-    --border-medium: #223766;
+    --border-medium: #1e325c;
+    --border-strong: #2a4680;
     --text-primary: #f8fafc;
-    --text-secondary: #94a3b8;
-    --text-muted: #64748b;
+    --text-secondary: #cbd5e1;
+    --text-muted: #94a3b8;
     --color-primary: #00e5ff;
     --color-primary-hover: #33ebff;
     --color-secondary: #3b82f6;
@@ -18,17 +19,22 @@
     --color-danger: #ef4444;
     --color-success: #10b981;
     --radius-ui: 8px;
+    --touch-target-min: 48px;
+    --font-size-base: 16px;
+    --font-size-secondary: 14px;
+    --font-size-caption: 12px;
   }
 
   [data-theme="light"], .light {
-    --bg-base: #f1f5f9;
+    --bg-base: #f8fafc;
     --bg-surface: #ffffff;
-    --bg-elevated: #e2e8f0;
-    --bg-hover: #cbd5e1;
+    --bg-elevated: #f1f5f9;
+    --bg-hover: #e2e8f0;
     --border-subtle: #cbd5e1;
     --border-medium: #94a3b8;
+    --border-strong: #64748b;
     --text-primary: #0f172a;
-    --text-secondary: #475569;
+    --text-secondary: #334155;
     --text-muted: #64748b;
     --color-primary: #0284c7;
     --color-primary-hover: #0369a1;
@@ -38,15 +44,36 @@
     --color-success: #059669;
   }
 
+  html {
+    font-size: 16px;
+    overscroll-behavior-y: contain;
+  }
+
   body {
     background-color: var(--bg-base);
     color: var(--text-primary);
     font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     -webkit-font-smoothing: antialiased;
-    min-height: 100vh;
+    min-height: 100dvh;
+    font-size: 16px;
+    line-height: 1.5;
+    overscroll-behavior-y: contain;
   }
 
-  /* Custom scrollbars for dense operator UI */
+  /* Form and Input Accessibility Standards (A1) */
+  input:not([type="checkbox"]):not([type="radio"]),
+  select,
+  textarea {
+    font-size: 16px !important; /* Prevents auto-zoom on iOS and Android Chrome */
+    min-height: 48px;
+  }
+
+  button, a {
+    min-height: 44px;
+    touch-action: manipulation;
+  }
+
+  /* Custom scrollbars */
   ::-webkit-scrollbar {
     width: 6px;
     height: 6px;
@@ -60,6 +87,23 @@
   }
   ::-webkit-scrollbar-thumb:hover {
     background: var(--text-muted);
+  }
+}
+
+/* Safe area padding utilities */
+.safe-area-pt {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+.safe-area-pb {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, ::before, ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }
 

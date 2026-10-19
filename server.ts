@@ -179,9 +179,17 @@ async function requireSession(req: Request, res: Response, next: NextFunction) {
   }
 
   // S1 & S2: Demo mode may exist ONLY when NODE_ENV is not production AND DEMO_MODE=true AND Supabase is unconfigured
+  const isProduction = process.env.NODE_ENV === 'production';
+  if (isProduction && token === 'demo_operator_session_token') {
+    return res.status(401).json({
+      error: 'UNAUTHORIZED',
+      message: 'Demo mode is strictly forbidden in production environments.',
+    });
+  }
+
   const isDemoAllowed =
-    process.env.NODE_ENV !== 'production' &&
-    process.env.DEMO_MODE !== 'false' &&
+    !isProduction &&
+    (process.env.DEMO_MODE === 'true' || process.env.VITE_DEMO_MODE === 'true') &&
     !supabaseServer;
 
   if (isDemoAllowed && token === 'demo_operator_session_token') {
@@ -1231,6 +1239,9 @@ app.patch('/api/crm/milestones/:id', requireSession, async (req: Request, res: R
   const data = db.get();
   const ms = (data.milestones || []).find((m) => m.id === req.params.id);
   if (!ms) return res.status(404).json({ error: 'NOT_FOUND', message: 'Milestone not found' });
+  if (req.body.title) ms.title = req.body.title;
+  if (req.body.due_date !== undefined) ms.due_date = req.body.due_date;
+  if (req.body.sort_order !== undefined) ms.sort_order = req.body.sort_order;
   if (req.body.status) ms.status = req.body.status;
   if (req.body.status === 'done') ms.completed_at = new Date().toISOString();
   ms.updated_at = new Date().toISOString();
