@@ -13,6 +13,7 @@ import { MCP_TOOLS, authenticateKey, executeMcpTool } from './src/server/mcpServ
 import { Client, Contact, Engagement, Quote, QuoteLine, BuildBrief, RequestItem, Activity, Invoice, InvoiceItem, Payment, Retainer, Milestone } from './src/types/crm';
 import { generateInvoicePdf, generateQuotePdf } from './src/server/pdfGenerator';
 import { sendPushNotification, getPublicVapidKey } from './src/server/pushNotifier';
+import { processWebsiteIntake } from './src/server/intakeService';
 
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
@@ -156,6 +157,24 @@ function requireApiAuth(requiredScope: string) {
     res.setHeader('X-Request-Id', (req as any).requestId);
     next();
   };
+}
+
+function authenticateApiKey(req: Request, res: Response, next: NextFunction) {
+  const authHeader = req.headers.authorization;
+  const authResult = authenticateKey(authHeader);
+
+  if (!authResult.success || !authResult.key) {
+    const ip = req.ip || req.socket.remoteAddress || 'unknown';
+    recordFailedIpAttempt(ip);
+    return res.status(401).json({
+      error: authResult.error || 'Invalid or missing API key',
+    });
+  }
+
+  (req as any).apiKey = authResult.key;
+  (req as any).requestId = req.headers['idempotency-key'] || `req_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
+  res.setHeader('X-Request-Id', (req as any).requestId);
+  next();
 }
 
 // -------------------------------------------------------------
@@ -2457,6 +2476,21 @@ app.post('/api/intake', (req, res) => {
     is_new: isNew,
     message: isNew ? 'Lead recorded at stage Engaged' : 'Inquiry added to existing client card (deduplicated)',
   });
+});
+
+// -------------------------------------------------------------
+// POST /api/v1/intake (Website Intake Endpoint)
+// -------------------------------------------------------------
+app.post('/api/v1/intake', authenticateApiKey, async (req: Request, res: Response) => {
+  try {
+    const result = await processWebsiteIntake(req.body);
+    if (result.error || !result.data) {
+      return res.status(result.status || 400).json({ error: result.error || 'Failed to process intake' });
+    }
+    return res.status(result.status || 200).json(result.data);
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Internal server error' });
+  }
 });
 
 // -------------------------------------------------------------

@@ -1249,4 +1249,56 @@ export const MCP_TOOLS: McpToolDefinition[] = [
       required: ['entity_type', 'entity_id', 'confirmation'],
     },
   },
+  {
+    name: 'crm_create_lead',
+    description: 'Create or update a client from a website conversation. Deduplicates by email or phone.',
+    requiredScope: 'clients:write',
+    group: 'clients',
+    isWrite: true,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Lead or contact full name' },
+        email: { type: 'string', description: 'Email address' },
+        phone: { type: 'string', description: 'Phone or mobile number' },
+        company: { type: 'string', description: 'Company or business name' },
+        summary: { type: 'string', description: 'Conversation summary or inquiry details' },
+        intent: { type: 'string', description: 'Client intent or project interest' },
+        session_id: { type: 'string', description: 'Website conversation session identifier' },
+        consent: { type: 'boolean', description: 'Must be true to record lead' },
+      },
+      required: ['name', 'consent'],
+    },
+  },
+  {
+    name: 'crm_get_client',
+    description: 'Get full client record including stage, engagements, recent activities and open tasks.',
+    requiredScope: 'clients:write',
+    group: 'clients',
+    isWrite: false,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        client_id: { type: 'string', description: 'Client ID or CIQ-C-NNNN code' },
+        email: { type: 'string', description: 'Contact email address' },
+        phone: { type: 'string', description: 'Contact phone number' },
+      },
+    },
+  },
+  {
+    name: 'crm_update_stage',
+    description: 'Move a client engagement to a new pipeline stage.',
+    requiredScope: 'clients:write',
+    group: 'pipeline',
+    isWrite: true,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        engagement_id: { type: 'string', description: 'Engagement ID' },
+        stage_key: { type: 'string', description: 'Target stage key or ID' },
+        reason: { type: 'string', description: 'Reason for stage transition' },
+      },
+      required: ['engagement_id', 'stage_key', 'reason'],
+    },
+  },
 ];

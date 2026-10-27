@@ -153,7 +153,8 @@ export interface Activity {
     | 'feedback'
     | 'deliverable'
     | 'system'
-    | 'agent';
+    | 'agent'
+    | 'intake';
   summary: string;
   body: string;
   actor_type: 'human' | 'agent' | 'system' | 'ai' | 'service';

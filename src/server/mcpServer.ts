@@ -23,6 +23,7 @@ import {
 import { MCP_TOOLS, McpToolDefinition } from '../shared/mcpToolList';
 import { generateInvoicePdf, generateQuotePdf } from './pdfGenerator';
 import { sendPushNotification } from './pushNotifier';
+import { processWebsiteIntake } from './intakeService';
 
 export { MCP_TOOLS };
 export type { McpToolDefinition };
@@ -1873,6 +1874,170 @@ export async function executeMcpTool(
             send_mode: businessSettings.send_mode,
             agents_paused: businessSettings.agents_paused,
           },
+        },
+      };
+    }
+
+    case 'crm_create_lead': {
+      if (!args.name) {
+        return { success: false, error: { code: 'BAD_REQUEST', message: 'name is required' } };
+      }
+      if (args.consent !== true) {
+        return { success: false, error: { code: 'BAD_REQUEST', message: 'consent must be true' } };
+      }
+      const result = await processWebsiteIntake({
+        source: 'agent',
+        session_id: args.session_id,
+        name: args.name,
+        email: args.email,
+        phone: args.phone,
+        company: args.company,
+        summary: args.summary,
+        intent: args.intent,
+        consent: true,
+        honeypot: '',
+      });
+      if (result.error || !result.data) {
+        return {
+          success: false,
+          error: { code: 'INTAKE_ERROR', message: result.error || 'Failed to process lead intake' },
+        };
+      }
+      return {
+        success: true,
+        result: result.data,
+      };
+    }
+
+    case 'crm_get_client': {
+      const { client_id, email, phone } = args;
+      if (!client_id && !email && !phone) {
+        return {
+          success: false,
+          error: { code: 'BAD_REQUEST', message: 'At least one of client_id, email, or phone is required' },
+        };
+      }
+
+      const cleanEmail = email ? String(email).trim().toLowerCase() : '';
+      const cleanPhone = phone ? String(phone).trim() : '';
+
+      const client = data.clients.find((c) => {
+        if (client_id && (c.id === client_id || c.client_code === client_id)) return true;
+        const matchingContact = (data.contacts || []).find((cnt) => {
+          if (cnt.client_id !== c.id) return false;
+          if (cleanEmail && cnt.email && cnt.email.trim().toLowerCase() === cleanEmail) return true;
+          if (cleanPhone && cnt.phone && cnt.phone.trim() === cleanPhone) return true;
+          if (cleanPhone && cnt.whatsapp && cnt.whatsapp.trim() === cleanPhone) return true;
+          return false;
+        });
+        if (matchingContact) return true;
+        if (cleanEmail && c.custom?.email && String(c.custom.email).trim().toLowerCase() === cleanEmail) return true;
+        if (cleanPhone && c.custom?.phone && String(c.custom.phone).trim() === cleanPhone) return true;
+        return false;
+      });
+
+      if (!client) {
+        return {
+          success: false,
+          error: { code: 'NOT_FOUND', message: 'Client not found' },
+        };
+      }
+
+      const clientEngagements = (data.engagements || []).filter((e) => e.client_id === client.id && !e.archived_at);
+      const primaryEngagement = clientEngagements[0] || null;
+      const stageObj = primaryEngagement
+        ? (data.pipeline_stages || []).find((s) => s.id === primaryEngagement.stage_id)
+        : null;
+      const stage = stageObj?.name || stageObj?.key || 'Unassigned';
+
+      const recentActivities = (data.activities || [])
+        .filter((a) => a.client_id === client.id)
+        .sort((a, b) => new Date(b.occurred_at).getTime() - new Date(a.occurred_at).getTime())
+        .slice(0, 5);
+
+      const openTasksCount = (data.tasks || []).filter((t) => t.client_id === client.id && t.status === 'open').length;
+
+      return {
+        success: true,
+        result: {
+          name: client.name,
+          code: client.client_code,
+          stage,
+          health_score: client.health_score,
+          recent_activities: recentActivities,
+          open_tasks_count: openTasksCount,
+          engagement_title: primaryEngagement ? primaryEngagement.title : null,
+        },
+      };
+    }
+
+    case 'crm_update_stage': {
+      const { engagement_id, stage_key, reason } = args;
+      if (!engagement_id || !stage_key || !reason) {
+        return {
+          success: false,
+          error: { code: 'BAD_REQUEST', message: 'engagement_id, stage_key, and reason are required' },
+        };
+      }
+
+      const eng = (data.engagements || []).find((e) => e.id === engagement_id);
+      if (!eng) {
+        return {
+          success: false,
+          error: { code: 'NOT_FOUND', message: `Engagement ${engagement_id} not found` },
+        };
+      }
+
+      const targetStage = (data.pipeline_stages || []).find(
+        (s) => s.key === stage_key || s.id === stage_key || s.name.toLowerCase() === String(stage_key).toLowerCase()
+      );
+      if (!targetStage) {
+        return {
+          success: false,
+          error: { code: 'NOT_FOUND', message: `Stage '${stage_key}' not found` },
+        };
+      }
+
+      const fromStageId = eng.stage_id;
+      const now = new Date().toISOString();
+      eng.stage_id = targetStage.id;
+      eng.stage_entered_at = now;
+      eng.updated_at = now;
+      if (targetStage.outcome) eng.outcome = targetStage.outcome;
+
+      data.stage_history.push({
+        id: `sth_${Date.now()}_${crypto.randomBytes(2).toString('hex')}`,
+        engagement_id: eng.id,
+        from_stage_id: fromStageId,
+        to_stage_id: targetStage.id,
+        actor_type: actorType,
+        actor_name: actorName,
+        reason: String(reason).trim(),
+        created_at: now,
+      });
+
+      data.activities.push({
+        id: `act_${Date.now()}_${crypto.randomBytes(2).toString('hex')}`,
+        client_id: eng.client_id,
+        engagement_id: eng.id,
+        type: 'stage_change',
+        summary: `Stage transitioned to ${targetStage.name} by ${actorName}`,
+        body: String(reason).trim(),
+        actor_type: actorType,
+        actor_name: actorName,
+        metadata: { from_stage_id: fromStageId, to_stage_id: targetStage.id, stage_key: args.stage_key },
+        occurred_at: now,
+      });
+
+      db.save();
+
+      return {
+        success: true,
+        result: {
+          engagement_id: eng.id,
+          stage_id: targetStage.id,
+          stage_name: targetStage.name,
+          updated_at: now,
         },
       };
     }

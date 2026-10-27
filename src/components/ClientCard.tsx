@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   User,
   Phone,
@@ -24,8 +24,6 @@ import {
   Trash2,
   Paperclip,
   Share2,
-  FileText,
-  DollarSign,
   ListChecks,
   ArrowUp,
   ArrowDown,
