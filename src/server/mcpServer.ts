@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { db, generateToken } from './db';
+import { supabaseServer } from './supabaseServer';
 import { hasScope } from './scopes';
 import { computeLinePrice, computeQuoteTotals } from './pricingEngine';
 import { governor } from './governor';
@@ -549,16 +550,81 @@ const UNUSED_LEGACY_TOOLS: any[] = [
   },
 ];
 
-// Helper to authenticate API Key
-export function authenticateKey(authHeader?: string): { success: boolean; key?: ApiKey; error?: string } {
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+// Helper to authenticate API Key (queries Supabase api_keys with local in-memory fallback)
+export async function authenticateKey(authHeader?: string): Promise<{ success: boolean; key?: ApiKey; error?: string }> {
+  if (!authHeader || !authHeader.trim().toLowerCase().startsWith('bearer ')) {
     return { success: false, error: 'Missing or malformed Authorization header (Expected Bearer ciq_crm_...)' };
   }
-  const token = authHeader.substring(7).trim();
+  const token = authHeader.replace(/^Bearer\s+/i, '').trim();
+  if (!token) {
+    return { success: false, error: 'Missing or malformed Authorization header (Expected Bearer ciq_crm_...)' };
+  }
   const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
 
+  // 1. Query Supabase api_keys table if configured
+  if (supabaseServer) {
+    try {
+      const { data: keyRow, error } = await supabaseServer
+        .from('api_keys')
+        .select('*')
+        .eq('key_hash', tokenHash)
+        .maybeSingle();
+
+      if (!error && keyRow) {
+        if (keyRow.is_active === false) {
+          return { success: false, error: 'API key is inactive' };
+        }
+        if (keyRow.revoked_at) {
+          return { success: false, error: 'API key has been revoked' };
+        }
+        if (keyRow.expires_at && new Date(keyRow.expires_at) < new Date()) {
+          return { success: false, error: 'API key has expired' };
+        }
+
+        // Asynchronously update last_used_at in Supabase
+        supabaseServer
+          .from('api_keys')
+          .update({ last_used_at: new Date().toISOString() })
+          .eq('id', keyRow.id)
+          .then(() => {}, (err: any) => console.warn('Could not update key last_used_at in Supabase:', err));
+
+        let scopes: string[] = [];
+        if (Array.isArray(keyRow.scopes)) {
+          scopes = keyRow.scopes;
+        } else if (typeof keyRow.scopes === 'string') {
+          try {
+            scopes = JSON.parse(keyRow.scopes);
+          } catch {
+            scopes = [keyRow.scopes];
+          }
+        }
+
+        const apiKey: ApiKey = {
+          id: keyRow.id || `key_${tokenHash.substring(0, 8)}`,
+          name: keyRow.name || keyRow.actor_name || 'API Key',
+          actor_name: keyRow.actor_name || 'Service',
+          actor_type: keyRow.actor_type || 'service',
+          key_prefix: keyRow.key_prefix || (token.startsWith('ciq_crm_') ? token.split('_').slice(0, 3).join('_') : 'ciq_crm'),
+          key_hash: keyRow.key_hash,
+          scopes,
+          rate_limit_per_min: keyRow.rate_limit_per_min || 120,
+          expires_at: keyRow.expires_at || null,
+          last_used_at: new Date().toISOString(),
+          revoked_at: keyRow.revoked_at || null,
+          created_by: keyRow.created_by || 'system',
+          created_at: keyRow.created_at || new Date().toISOString(),
+        };
+
+        return { success: true, key: apiKey };
+      }
+    } catch (err) {
+      console.warn('Supabase api_keys query error, checking local db:', err);
+    }
+  }
+
+  // 2. Fallback to local in-memory database
   const data = db.get();
-  const apiKey = data.api_keys.find((k) => {
+  const apiKey = data.api_keys?.find((k) => {
     if (!k.key_hash || k.key_hash.length !== tokenHash.length) return false;
     try {
       return crypto.timingSafeEqual(Buffer.from(k.key_hash), Buffer.from(tokenHash));
@@ -569,6 +635,9 @@ export function authenticateKey(authHeader?: string): { success: boolean; key?: 
 
   if (!apiKey) {
     return { success: false, error: 'Invalid API key' };
+  }
+  if ((apiKey as any).is_active === false) {
+    return { success: false, error: 'API key is inactive' };
   }
   if (apiKey.revoked_at) {
     return { success: false, error: 'API key has been revoked' };

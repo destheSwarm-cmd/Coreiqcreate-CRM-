@@ -4,7 +4,9 @@ import fs from 'fs';
 import path from 'path';
 import dotenv from 'dotenv';
 dotenv.config();
-import { createClient as createSupabaseClient, SupabaseClient } from '@supabase/supabase-js';
+import { SupabaseClient } from '@supabase/supabase-js';
+import { supabaseServer } from './src/server/supabaseServer';
+export { supabaseServer };
 import { db, generateToken } from './src/server/db';
 import { ALL_SCOPES, GRANTABLE_SCOPES, SCOPE_PRESETS, hasScope } from './src/server/scopes';
 import { computeLinePrice, computeQuoteTotals } from './src/server/pricingEngine';
@@ -13,24 +15,12 @@ import { MCP_TOOLS, authenticateKey, executeMcpTool } from './src/server/mcpServ
 import { Client, Contact, Engagement, Quote, QuoteLine, BuildBrief, RequestItem, Activity, Invoice, InvoiceItem, Payment, Retainer, Milestone } from './src/types/crm';
 import { generateInvoicePdf, generateQuotePdf } from './src/server/pdfGenerator';
 import { sendPushNotification, getPublicVapidKey } from './src/server/pushNotifier';
-import { processWebsiteIntake } from './src/server/intakeService';
+import { processWebsiteIntake, sendOutboxRow, WebsiteIntakeBody } from './src/server/intakeService';
+export { sendOutboxRow };
 
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 const APP_URL = process.env.APP_URL || '';
-
-// Supabase Server Client (initialized from env using service role key, server-side only)
-const SUPABASE_URL = process.env.SUPABASE_URL || '';
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
-
-export const supabaseServer: SupabaseClient | null = (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY)
-  ? createSupabaseClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
-      auth: {
-        autoRefreshToken: false,
-        persistSession: false,
-      },
-    })
-  : null;
 
 // Security Headers (Section 10) - Permitting iframe embedding for AI Studio
 app.use((_req: Request, res: Response, next: NextFunction) => {
@@ -105,7 +95,7 @@ function recordFailedIpAttempt(ip: string) {
 
 // REST API Bearer Auth Middleware with Failed IP Rate-Limiting (Section 10)
 function requireApiAuth(requiredScope: string) {
-  return (req: Request, res: Response, next: NextFunction) => {
+  return async (req: Request, res: Response, next: NextFunction) => {
     const ip = req.ip || req.socket.remoteAddress || 'unknown';
     const ipCheck = checkFailedIpLimit(ip);
     if (!ipCheck.allowed) {
@@ -119,7 +109,7 @@ function requireApiAuth(requiredScope: string) {
     }
 
     const authHeader = req.headers.authorization;
-    const authResult = authenticateKey(authHeader);
+    const authResult = await authenticateKey(authHeader);
 
     if (!authResult.success || !authResult.key) {
       recordFailedIpAttempt(ip);
@@ -159,9 +149,9 @@ function requireApiAuth(requiredScope: string) {
   };
 }
 
-function authenticateApiKey(req: Request, res: Response, next: NextFunction) {
+async function authenticateApiKey(req: Request, res: Response, next: NextFunction) {
   const authHeader = req.headers.authorization;
-  const authResult = authenticateKey(authHeader);
+  const authResult = await authenticateKey(authHeader);
 
   if (!authResult.success || !authResult.key) {
     const ip = req.ip || req.socket.remoteAddress || 'unknown';
@@ -208,7 +198,8 @@ async function requireSession(req: Request, res: Response, next: NextFunction) {
 
   const isDemoAllowed =
     !isProduction &&
-    (process.env.DEMO_MODE === 'true' || process.env.VITE_DEMO_MODE === 'true') &&
+    process.env.DEMO_MODE !== 'false' &&
+    process.env.VITE_DEMO_MODE !== 'false' &&
     !supabaseServer;
 
   if (isDemoAllowed && token === 'demo_operator_session_token') {
@@ -1526,6 +1517,52 @@ app.post('/api/v1/admin/jobs/backup', requireSession, requireRole(['owner', 'adm
   });
 });
 
+// POST /api/v1/admin/crm-bridge/test (Synthetic CRM bridge test)
+app.post('/api/v1/admin/crm-bridge/test', async (req: Request, res: Response) => {
+  try {
+    // Build synthetic test payload adhering strictly to intake schema
+    const syntheticPayload: WebsiteIntakeBody = {
+      source: req.body?.source || 'crm_bridge_synthetic_test',
+      session_id: req.body?.session_id || `sess_syn_${Date.now()}`,
+      name: req.body?.name || 'Synthetic Test Lead',
+      email: req.body?.email || 'synthetic.test@coreiq.com',
+      phone: req.body?.phone || '+27821234567',
+      company: req.body?.company || 'Synthetic Industries Pty Ltd',
+      summary: req.body?.summary || 'Verification of CRM bridge ingestion pipeline via synthetic payload',
+      intent: req.body?.intent || 'Automation',
+      budget_hint: req.body?.budget_hint || '15000',
+      page_url: req.body?.page_url || 'https://coreiq.com/contact',
+      consent: true,
+      honeypot: '',
+    };
+
+    // Dispatch via sendOutboxRow using process.env.CRM_INTAKE_KEY
+    const targetUrl = req.body?.target_url || `http://127.0.0.1:${PORT}/api/v1/intake`;
+    const result = await sendOutboxRow(syntheticPayload, targetUrl);
+
+    if (!result.success) {
+      return res.status(result.status || 500).json({
+        success: false,
+        error: result.error,
+        details: result.data,
+        payload: syntheticPayload,
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'CRM bridge synthetic test passed successfully',
+      data: result.data,
+      payload: syntheticPayload,
+    });
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      error: err.message || 'Internal error executing CRM bridge synthetic test',
+    });
+  }
+});
+
 // GET /api/v1/clients → list clients (not archived), paginated, filter by name
 app.get('/api/v1/clients', requireSession, async (req: Request, res: Response) => {
   try {
@@ -1871,7 +1908,7 @@ app.get('/v1/openapi.json', (req, res) => {
 // -------------------------------------------------------------
 const handleMcp = async (req: Request, res: Response) => {
   const authHeader = req.headers.authorization;
-  const authResult = authenticateKey(authHeader);
+  const authResult = await authenticateKey(authHeader);
 
   if (!authResult.success || !authResult.key) {
     return res.status(401).json({
@@ -3023,7 +3060,7 @@ app.get('/api/verification-report', requireSession, requireRole(['owner']), asyn
   }
 
   // Test 3: Revoked key refusal test
-  const revokedAuth = authenticateKey('Bearer ciq_crm_revoked_sample_key_000');
+  const revokedAuth = await authenticateKey('Bearer ciq_crm_revoked_sample_key_000');
   testResults.revoked_key_refusal = !revokedAuth.success && revokedAuth.error?.includes('revoked') ? 'PASSED (Refused)' : 'FAILED';
 
   // Test 4: Unpriced quote blocked from sending test

@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { db } from './db';
+import { supabaseServer } from './supabaseServer';
 import { Client, Engagement } from '../types/crm';
 
 export interface WebsiteIntakeBody {
@@ -216,6 +217,28 @@ export async function processWebsiteIntake(body: WebsiteIntakeBody): Promise<Web
 
     db.save();
 
+    // If Supabase is connected, mirror the records so Supabase stays synchronized
+    if (supabaseServer) {
+      try {
+        if (!existingClient) {
+          await supabaseServer.from('clients').insert({
+            client_code: clientCode,
+            name: (body.name || body.company || (cleanEmail ? cleanEmail.split('@')[0] : 'Website Lead')).trim(),
+            type: body.company ? 'company' : 'individual',
+            website: body.page_url || null,
+            country: 'South Africa',
+            timezone: 'Africa/Johannesburg',
+            source: 'website',
+            notes: body.summary || null,
+            tags: ['website-lead', body.intent || 'inbound'].filter(Boolean),
+            health_score: 50,
+          });
+        }
+      } catch (sbErr) {
+        console.warn('Supabase mirror error during intake:', sbErr);
+      }
+    }
+
     // 8. Return: { client_id, code, stage, engagement_id }
     return {
       status: 200,
@@ -230,6 +253,64 @@ export async function processWebsiteIntake(body: WebsiteIntakeBody): Promise<Web
     return {
       status: 500,
       error: err.message || 'Internal server error processing intake',
+    };
+  }
+}
+
+/**
+ * Dispatches an outbox intake row to the CRM intake endpoint.
+ * Uses the CRM_INTAKE_KEY environment variable from process.env, not a hardcoded key lookup by actor_name.
+ */
+export async function sendOutboxRow(
+  payload: WebsiteIntakeBody,
+  targetUrl?: string
+): Promise<{ success: boolean; status?: number; data?: any; error?: string }> {
+  const apiKey = process.env.CRM_INTAKE_KEY;
+  if (!apiKey) {
+    return {
+      success: false,
+      error: 'CRM_INTAKE_KEY environment variable is not configured in process.env',
+    };
+  }
+
+  const endpoint = targetUrl || `http://127.0.0.1:${process.env.PORT || 3000}/api/v1/intake`;
+
+  try {
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(payload),
+    });
+
+    const text = await res.text();
+    let responseData: any = null;
+    try {
+      responseData = JSON.parse(text);
+    } catch {
+      responseData = text;
+    }
+
+    if (!res.ok) {
+      return {
+        success: false,
+        status: res.status,
+        error: (responseData && (responseData.error || responseData.message)) || `HTTP ${res.status}: ${text}`,
+        data: responseData,
+      };
+    }
+
+    return {
+      success: true,
+      status: res.status,
+      data: responseData,
+    };
+  } catch (err: any) {
+    return {
+      success: false,
+      error: err.message || 'Failed to dispatch outbox row to CRM intake',
     };
   }
 }

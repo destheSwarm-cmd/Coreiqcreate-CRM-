@@ -108,6 +108,27 @@ export function App() {
       });
       subscription = authSub.data?.subscription;
     } else if (!savedDemo) {
+      const wasSignedOut = localStorage.getItem('ciq_demo_signed_out') === 'true';
+      if (!wasSignedOut) {
+        const demoSession = {
+          access_token: 'demo_operator_session_token',
+          token_type: 'bearer',
+          user: {
+            id: 'usr_desmond',
+            email: 'operator@coreiq.com',
+            user_metadata: { display_name: 'Desmond (Owner Operator)' },
+            app_metadata: { role: 'owner' },
+            aud: 'authenticated',
+            created_at: new Date().toISOString(),
+          },
+        };
+        try {
+          localStorage.setItem('ciq_demo_session', JSON.stringify(demoSession));
+        } catch {
+          // ignore
+        }
+        setSession(demoSession as any);
+      }
       setIsSessionLoading(false);
     }
 
@@ -286,12 +307,14 @@ export function App() {
   };
 
   const handleDemoLogin = (demoSession: any) => {
+    localStorage.removeItem('ciq_demo_signed_out');
     setSession(demoSession);
     setIsSessionLoading(false);
   };
 
   const handleSignOut = async () => {
     localStorage.removeItem('ciq_demo_session');
+    localStorage.setItem('ciq_demo_signed_out', 'true');
     if (isSupabaseConfigured) {
       try {
         await supabase.auth.signOut();
